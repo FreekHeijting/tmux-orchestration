@@ -1,0 +1,24 @@
+F5 empirical: paste-buffer name collision
+Run: 2026-05-10 16:39 UTC
+Method: tmux-only (no claude needed; pure paste-buffer mechanics)
+
+Step 1: sender X loads "shared-name" with PAYLOAD-X
+Step 2: sender Y loads "shared-name" with PAYLOAD-Y (overwrite)
+Step 3: sender X performs paste-buffer -b shared-name into receiver pane
+
+Result (capture-pane of receiver):
+freek@host:~$ PAYLOAD-Y-from-sender-Y
+PAYLOAD-Y-from-sender-Y: opdracht niet gevonden
+
+Conclusion:
+- tmux load-buffer -b NAME silently overwrites any existing buffer of that name.
+- Last-loader wins. X's content is gone the instant Y calls load-buffer.
+- X's subsequent paste-buffer injects Y's content.
+- No warning, no error, silent data corruption.
+
+Mitigation (mandatory):
+- Buffer names MUST include sender identity + nanosecond timestamp:
+    BUF="peer-${TMO_SESSION}-$(date +%s%N)"
+- Two senders cannot collide because (a) different TMO_SESSION values, and
+  (b) different nanosecond stamps within one sender.
+- ALWAYS delete-buffer after paste-buffer to avoid leaking buffer slots.

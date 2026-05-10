@@ -222,35 +222,79 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ### 5.4 Multiple peer-prompts in flight to same target within 1 second
 
-- Status: <pending F5>
+- Status: PROVEN with caveat (F5)
 - Transcript: `tests/peer-comm/04-rapid-multi.txt`
-- Expected: prompts concatenate in input buffer, single Enter submits combined text. Or last-wins. Need empirical answer.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Repro: `bash tests/peer-comm/04-rapid-multi.sh`
+- Expected: prompts queue in submission order, FIFO, claude processes one-by-one.
+- Observed:
+  - 3 peer-prompts (RAPID-1, RAPID-2, RAPID-3) fired ~250ms apart
+  - RAPID-1 entered REPL and started processing immediately ("Nesting...")
+  - RAPID-2 and RAPID-3 appeared as queued items under "Press up to edit queued messages"
+  - claude processed and emitted ONE response with `RAPID-ACK-2` and `RAPID-ACK-3`
+  - `RAPID-ACK-1` was NOT visible in the transcript: claude appears to have merged the queued tail or partially absorbed prompt 1 into the queued-batch turn
+  - Lesson: rapid-fire CAN cause apparent ack loss / prompt-merging at queue boundaries
+- Mitigation: serialize peer-prompts via wait-for-ack pattern when each prompt requires its own isolated turn:
+  ```bash
+  send_peer_prompt
+  until tmux capture-pane -t "$PEER:0.0" -p -S -200 | grep -q "$EXPECTED_ACK"; do sleep 2; done
+  send_next_peer_prompt
+  ```
+  Use rapid-fire only for fire-and-forget broadcasts where ack-isolation is not required.
 
 ### 5.5 Paste-buffer name collision
 
-- Status: <pending F5>
+- Status: PROVEN (F5)
 - Transcript: `tests/peer-comm/05-buffer-collision.txt`
-- Expected: `tmux load-buffer -b <name>` overwrites existing buffer. If two senders use the same name, last-loader's payload wins, first sender's `paste-buffer` injects the wrong content.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Repro: `bash tests/peer-comm/05-buffer-collision.sh`
+- Expected: `tmux load-buffer -b <name>` overwrites existing buffer. Last-loader wins.
+- Observed:
+  - sender X: `printf 'PAYLOAD-X' | tmux load-buffer -b shared-name -`
+  - sender Y: `printf 'PAYLOAD-Y' | tmux load-buffer -b shared-name -`
+  - sender X: `tmux paste-buffer -b shared-name`
+  - receiver pane shows `PAYLOAD-Y-from-sender-Y` (Y's content)
+  - X's content silently lost; no warning, no error
+- Mitigation: per-sender + nanosecond-unique buffer names:
+  ```bash
+  BUF="peer-${TMO_SESSION}-$(date +%s%N)"
+  ```
+  This is already mandated in the Channel A wire sequence (section 1) and the audit-log payload includes `buf` so the orchestrator can spot-check uniqueness.
 
 ### 5.6 Peer in trust-folder dialog
 
-- Status: <pending F5>
+- Status: PROVEN DANGEROUS (F5)
 - Transcript: `tests/peer-comm/06-trust-dialog.txt`
+- Repro: `bash tests/peer-comm/06-trust-dialog.sh`
 - Expected: paste goes into the dialog's input, Enter activates the default button or types into the dialog field. Disruptive.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Observed:
+  - dialog active: "Accessing workspace: ... Yes, I trust this folder / No, exit / Enter to confirm · Esc to cancel"
+  - Channel A injection: paste was silently swallowed by the dialog UI (not visible anywhere)
+  - Enter activated the focused option ("Yes, I trust this folder" by default)
+  - dialog accepted; claude proceeded into normal REPL state
+  - peer-prompt LOST; no audit trail of failure beyond absence of a peer-reply
+  - INADVERTENT CONFIRMATION risk: any dialog (trust-folder, permission-grant, destructive-action confirmation) could be auto-accepted by an injection
+- Mitigation: sender pre-flight grep for known dialog headers BEFORE Channel A injection:
+  ```bash
+  if tmux capture-pane -t "$PEER:0.0" -p -S -50 \
+       | grep -qE 'Accessing workspace:|Quick safety check:|Enter to confirm · Esc to cancel'; then
+    tmo send orchestrator forward "..."  # Channel B fallback
+    exit 0
+  fi
+  ```
+  Combine with the section 5.3 mitigation (`is_claude_repl` check). Together they cover bash-prompt and dialog-state.
 
 ### 5.7 Peer has different reply-language
 
-- Status: <pending F5>
+- Status: PROVEN (F5)
 - Transcript: `tests/peer-comm/07-language.txt`
-- Expected: receiver responds in own configured reply-language regardless of sender language. No protocol-level mismatch.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Repro: `bash tests/peer-comm/07-language.sh`
+- Expected: receiver responds in body-content language; English `[from X]` prefix is metadata only.
+- Observed:
+  - sender prefix `[from peercomm-orch]` (English)
+  - body: Dutch ("Beantwoord deze vraag uitsluitend in het Nederlands... Welke kleur is de lucht...")
+  - receiver reply was in Dutch: "Lucht overdag bij helder weer blauw. Komt door Rayleigh-verstrooiing..."
+  - terminator `LANG-NL-OK` returned correctly
+  - prefix did not influence reply-language; body content (and any per-session language config) does
+- Mitigation: none required for protocol. Sender writes body in receiver's expected reply-language (default English; per role-md if specified). Prefix stays English `[from <session>]` regardless.
 
 ### 5.8 Hard-inject (Esc Esc) during sender's own busy state
 
@@ -263,27 +307,50 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ## 6. Supported API surface
 
-To be finalized in phase F6 once empirical evidence is in.
+Final, derived from empirical evidence in section 5 and the live `bin/tmo` implementation.
 
-Stable:
-- Channel A (direct injection sequence in section 1)
-- Channel B (orchestrator forward in section 2)
-- Channel C (jsonl audit log in section 3)
-- Self-identification prefix (section 4)
-- `tmo send` for audit-log + forward
-- `tmo receive` for inbox polling
-- `tmo note <session> <body>` for soft sidenote injection (section 1 wire sequence under the hood)
+### Stable
 
-Experimental:
-- `tmo note --hard` (Esc Esc + inject). Operator-only.
-- Cross-workspace peer-comm via shared `TMO_STATE_DIR`.
+Use these freely in worker logic.
 
-Not supported:
-- Sender-side hard-inject of self
-- Direct injection across hosts (only single-host tmux supported today)
-- Binary payloads via Channel A (text only; for binary use file-paths in payload + Channel C)
+| Surface | Form | Purpose |
+|---|---|---|
+| Channel A | `load-buffer + paste-buffer + sleep 0.2 + send-keys Enter + delete-buffer` (section 1) | Direct peer-injection. Required pre-flight: `tmux has-session` AND capture-pane grep for claude REPL signals (sections 5.3 + 5.6). |
+| Channel B | `tmo send orchestrator forward '{"to":"<peer>","reason":"...","payload":...}'` (section 2) | Fallback when peer is not in claude REPL state. Orchestrator handles. |
+| Channel C | `tmo send <to> <type> '<json>'` writes to `state/messages.jsonl` (section 3) | Audit log. Mandatory pairing with Channel A. |
+| Self-id prefix | `[from <$TMO_SESSION>]` at start of every body (section 4) | Receiver sees who is asking without parsing audit-log. |
+| `tmo send <to> <type> <json>` | append message to `state/messages.jsonl` | Audit-log + Channel B. |
+| `tmo receive [--for <s>] [--type <t>] [--since <ts>]` | read inbox messages | Worker polling. |
+| `tmo note <session> <body>` | soft-inject sidenote (Channel A under the hood with `[SIDENOTE HH:MM]` prefix) | Out-of-band steering, queued during busy. |
+| `tmo note <session> --raw <body>` | soft-inject without `[SIDENOTE]` prefix | When caller controls full prefix (e.g. `[from <self>]`). |
+| Buffer naming `peer-${TMO_SESSION}-$(date +%s%N)` | per-sender, nanosecond-unique buffer name | Prevents 5.5 collision. |
+| Wait-for-ack pattern | `until tmux capture-pane | grep -q "<EXPECTED>"; do sleep 2; done` | Serialize peer-prompts that need turn isolation (per 5.4). |
 
-Cross-references:
-- `skills/tmux-orchestration/SKILL.md` - Phase 6 (Communication protocol) and Phase 4 (Worker spawn) reference Channel A wire sequence
-- `roles/*.md` - every role inherits this protocol; no role-specific override is permitted
-- `bin/tmo` - implementation of `send`, `receive`, `note`, `wait-for`
+### Experimental
+
+These work but are not yet hardened or fully spec'd. Use with caution and explicit user approval.
+
+| Surface | Status | Caveat |
+|---|---|---|
+| `tmo note <session> --hard <body>` | experimental | Sends Esc Esc to abort current tool/turn before injecting. Risky during Write/Edit; can lose receiver work. Operator-only. |
+| Cross-workspace peer-comm via shared `TMO_STATE_DIR` | experimental | All workers point at one state dir (e.g. `/home/freek/GitHub/tmux-orchestrator/state`). Audit log unifies, peer-injection still requires same-host tmux. |
+| `tmo wait-for <session> <event>` | experimental (F5 stub in current `bin/tmo`) | Blocks on inbox event arrival. Implementation is a polling stub today. |
+| `tmo task` subcommands (`add/list/claim/update/done`) | experimental | Cross-session task tracker. Stable enough for orchestrator dispatch but not the focus of this doc. |
+
+### Not supported
+
+These are explicit non-goals. Do not attempt; there is no semantic for them.
+
+- Sender-side hard-inject of self (Esc Esc on own pane). Destructive to current tool-call.
+- Direct injection across hosts. Only same-host tmux is supported.
+- Binary payloads via Channel A. Text only. For binary, write to a file and include the path in a Channel C payload.
+- Last-wins concatenation semantics for rapid-fire prompts (per 5.4 caveat). If you need that, batch into one prompt body.
+
+### Cross-references
+
+- `skills/tmux-orchestration/SKILL.md` - Phase 6 ("Communication protocol") and Phase 4 ("Worker spawn") cite Channel A wire sequence and the load-buffer + paste-buffer + 2-step Enter rule
+- `skills/tmux-orchestration/references/cheatsheet-excerpt.md` - quick-reference for the same wire sequence (kept short for clipboard use)
+- `skills/tmux-orchestration/references/role-evolution-loop.md` - role graduation flow (orthogonal to this doc but referenced from SKILL.md Phase 4b)
+- `roles/orchestrator.md`, `roles/backend.md`, `roles/frontend.md`, `roles/reviewer.md`, `roles/generalist.md` - each role inherits this protocol; no role-specific override is permitted
+- `bin/tmo` - implementation of `send`, `receive`, `note`, `wait-for`, `task`, `spawn`, `bootstrap`
+- `tests/peer-comm/` - repro scripts and capture-pane transcripts for every empirical claim in section 5

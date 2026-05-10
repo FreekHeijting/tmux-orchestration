@@ -1,0 +1,31 @@
+F5 empirical: peer in trust-folder dialog
+Run: 2026-05-10 16:43 UTC
+Method: spawn claude in fresh /tmp dir without --dangerously-skip-permissions
+to force trust-folder dialog. Inject Channel A while dialog active.
+
+--- BEFORE injection (dialog active) ---
+ Accessing workspace:
+ /tmp/peer-test-fresh-1778424148
+
+ Quick safety check: Is this a project you created or one you trust?
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+ Enter to confirm · Esc to cancel
+
+--- AFTER injection (paste lost, Enter accepted dialog default option) ---
+[Welcome screen]
+❯ <empty REPL prompt>
+   ⏵⏵ bypass permissions on (shift+tab to cycle)
+
+Conclusion:
+- Pasted text was silently swallowed by the dialog UI (not visible anywhere).
+- Enter on the dialog ACTIVATED the focused option (default: Yes, I trust this folder).
+- The peer-prompt is LOST. No error, no audit trail of failure beyond absence of a peer-reply.
+- This is INADVERTENT CONFIRMATION. If the dialog were a destructive confirmation, Channel A injection would silently approve it.
+
+Mitigation (sender pre-flight):
+- Detect dialog presence via capture-pane grep for known dialog headers,
+  e.g. 'Accessing workspace:', 'Quick safety check:', 'Enter to confirm · Esc to cancel'.
+- If detected, fall back to Channel B (orchestrator forward).
+- Orchestrator decides whether to wait, dismiss the dialog, or raise to user.
+
