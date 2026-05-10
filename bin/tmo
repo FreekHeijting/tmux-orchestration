@@ -769,6 +769,90 @@ print(len(data.get("items") or []))
 PYEOF
 }
 
+_wd_backlog_top() {
+    # print "id|task|priority" of first item, or empty
+    python3 - "$WATCHDOG_BACKLOG_FILE" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f) or {}
+items = data.get("items") or []
+if items:
+    it = items[0]
+    print(f"{it.get('id', '?')}|{it.get('task', '?')}|{it.get('priority', '?')}")
+PYEOF
+}
+
+_wd_extract_question() {
+    # last non-empty non-fenced line of pane content (read from stdin)
+    python3 -c '
+import sys
+in_fence = False
+last = ""
+for line in sys.stdin.read().splitlines():
+    if line.lstrip().startswith("```"):
+        in_fence = not in_fence
+        continue
+    if in_fence:
+        continue
+    if line.strip():
+        last = line.rstrip()
+print(last)
+'
+}
+
+_wd_park_question() {
+    # _wd_park_question <session> <qid> <question>; pane content via stdin
+    # Uses python3 -c so stdin remains free for the pane pipe
+    # (python3 - <<heredoc would consume stdin via the heredoc).
+    local session="$1" qid="$2" question="$3"
+    local now; now="$(iso_ts)"
+    python3 -c '
+import sys, yaml
+path, session, qid, question, ts = sys.argv[1:]
+pane_excerpt = sys.stdin.read()[-2000:]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+parked = data.get("parked") or []
+parked.append({
+    "id": qid,
+    "session": session,
+    "question": question,
+    "parked_at": ts,
+    "pane_excerpt": pane_excerpt,
+})
+data["parked"] = parked
+with open(path, "w") as f:
+    yaml.safe_dump(data, f, sort_keys=False)
+' "$WATCHDOG_PARKED_FILE" "$session" "$qid" "$question" "$now"
+}
+
+_wd_soft_inject() {
+    # _wd_soft_inject <session> <message-without-prefix>
+    # Reuses cmd_note (soft mode). cmd_note prepends "[SIDENOTE HH:MM]" itself.
+    # This function adds the "[from watchdog]" self-identification prefix.
+    local session="$1" message="$2"
+    cmd_note "$session" "[from watchdog] $message" >/dev/null
+}
+
+_wd_set_parked_hash() {
+    # mark pane hash as "already prodded for this question" so subsequent
+    # ticks with identical pane don't keep incrementing the counter
+    local session="$1" hash="$2"
+    python3 - "$WATCHDOG_STATUS_FILE" "$session" "$hash" <<'PYEOF'
+import sys, yaml
+path, session, hash_ = sys.argv[1:]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+sessions = data.get("sessions") or {}
+entry = sessions.get(session) or {}
+entry["last_parked_pane_hash"] = hash_
+sessions[session] = entry
+data["sessions"] = sessions
+with open(path, "w") as f:
+    yaml.safe_dump(data, f, sort_keys=False)
+PYEOF
+}
+
 _wd_status_update() {
     # _wd_status_update <session> <status> <pane_hash> <awaiting_count> <question_id>
     local session="$1" status="$2" pane_hash="$3" count="$4" qid="$5"
@@ -842,21 +926,37 @@ _wd_tick() {
     _wd_detect_open_question "$pane" && is_open_q=1
     [[ -n "$prev_hash" && "$pane_hash" != "$prev_hash" ]] && changed=1
 
-    # current count (default 0)
-    local count; count=$(_wd_status_get "$session" "awaiting_user_count")
+    # current count + question id + last parked hash (defaults)
+    local count qid prev_status parked_hash
+    count=$(_wd_status_get "$session" "awaiting_user_count")
+    qid=$(_wd_status_get "$session" "current_question_id")
+    prev_status=$(_wd_status_get "$session" "status")
+    parked_hash=$(_wd_status_get "$session" "last_parked_pane_hash")
     [[ -z "$count" ]] && count=0
 
-    # classify
-    local new_status="" action="none"
+    # already-parked guard: if we already parked this exact pane, treat as idle
+    # until pane changes (avoids re-park spam on every tick).
+    local already_parked=0
+    [[ -n "$parked_hash" && "$pane_hash" == "$parked_hash" ]] && already_parked=1
+
+    # classify + question-id lifecycle
+    local new_status="" action="none" new_qid="null"
     if [[ "$is_busy" == "1" || "$changed" == "1" ]]; then
         new_status="active"
         count=0
-    elif [[ "$is_open_q" == "1" ]]; then
+        new_qid="null"
+    elif [[ "$is_open_q" == "1" && "$already_parked" == "0" ]]; then
         new_status="awaiting-user"
         count=$((count + 1))
+        if [[ -z "$qid" || "$prev_status" != "awaiting-user" ]]; then
+            new_qid="q-$(date +%s)-${session}"
+        else
+            new_qid="$qid"
+        fi
         action="log"
         [[ "$count" -ge 2 ]] && action="park-and-pick"
     else
+        new_qid="null"
         local backlog_n; backlog_n=$(_wd_backlog_count)
         if [[ "$backlog_n" -gt 0 ]]; then
             new_status="idle-with-backlog"
@@ -867,12 +967,45 @@ _wd_tick() {
         fi
     fi
 
-    _wd_status_update "$session" "$new_status" "$pane_hash" "$count" "null"
+    _wd_status_update "$session" "$new_status" "$pane_hash" "$count" "$new_qid"
 
-    printf '[watchdog %s] session=%s status=%s count=%s busy=%s changed=%s open_q=%s action=%s\n' \
-        "$now" "$session" "$new_status" "$count" "$is_busy" "$changed" "$is_open_q" "$action" >&2
+    printf '[watchdog %s] session=%s status=%s count=%s qid=%s busy=%s changed=%s open_q=%s parked_match=%s action=%s\n' \
+        "$now" "$session" "$new_status" "$count" "$new_qid" "$is_busy" "$changed" "$is_open_q" "$already_parked" "$action" >&2
 
-    # F5 will wire actions (park-and-pick, prod-backlog) to soft-inject.
+    # action wiring (F5)
+    case "$action" in
+        park-and-pick)
+            local question; question=$(printf '%s' "$pane" | _wd_extract_question)
+            printf '%s' "$pane" | _wd_park_question "$session" "$new_qid" "$question"
+            _wd_set_parked_hash "$session" "$pane_hash"
+            local backlog_top; backlog_top=$(_wd_backlog_top)
+            local msg
+            if [[ -n "$backlog_top" ]]; then
+                local b_id b_task
+                b_id="${backlog_top%%|*}"
+                b_task=$(printf '%s' "$backlog_top" | cut -d'|' -f2)
+                msg="user not replying on Q ($new_qid). Parked to state/parked-questions.yaml. Pick top backlog item: $b_id - $b_task"
+            else
+                msg="user not replying on Q ($new_qid). Parked to state/parked-questions.yaml. Backlog empty; carry on or wait."
+            fi
+            _wd_soft_inject "$session" "$msg"
+            # reset count after park (next open-q on changed pane will start fresh)
+            _wd_status_update "$session" "$new_status" "$pane_hash" "0" "null"
+            printf '[watchdog %s] session=%s park-and-pick done qid=%s\n' "$now" "$session" "$new_qid" >&2
+            ;;
+        prod-backlog)
+            local backlog_n; backlog_n=$(_wd_backlog_count)
+            local backlog_top; backlog_top=$(_wd_backlog_top)
+            local b_id="?" b_task="(unknown)"
+            if [[ -n "$backlog_top" ]]; then
+                b_id="${backlog_top%%|*}"
+                b_task=$(printf '%s' "$backlog_top" | cut -d'|' -f2)
+            fi
+            _wd_soft_inject "$session" "backlog has $backlog_n items, pick top-prio: $b_id - $b_task"
+            printf '[watchdog %s] session=%s prod-backlog done\n' "$now" "$session" >&2
+            ;;
+        log|none) ;;
+    esac
 }
 
 _wd_enable() {
@@ -923,23 +1056,51 @@ PYEOF
 }
 
 _wd_status_show() {
-    python3 - "$WATCHDOG_STATUS_FILE" <<'PYEOF'
+    python3 - "$WATCHDOG_STATUS_FILE" "$WATCHDOG_PARKED_FILE" "$WATCHDOG_BACKLOG_FILE" <<'PYEOF'
 import sys, yaml
-path = sys.argv[1]
-with open(path) as f:
-    data = yaml.safe_load(f) or {}
-sessions = data.get("sessions") or {}
+status_path, parked_path, backlog_path = sys.argv[1:4]
+
+with open(status_path) as f:
+    status = yaml.safe_load(f) or {}
+with open(parked_path) as f:
+    parked_data = yaml.safe_load(f) or {}
+with open(backlog_path) as f:
+    backlog_data = yaml.safe_load(f) or {}
+
+sessions = status.get("sessions") or {}
+parked = parked_data.get("parked") or []
+backlog = backlog_data.get("items") or []
+
 if not sessions:
     print("(no sessions tracked)")
-    sys.exit(0)
-hdr = f"{'SESSION':<24}{'STATUS':<22}{'COUNT':<7}{'ENABLED':<9}{'LAST_CHECKED'}"
-print(hdr)
-print("-" * len(hdr))
-for name, e in sessions.items():
-    print(f"{name:<24}{e.get('status', '?'):<22}"
-          f"{e.get('awaiting_user_count', 0):<7}"
-          f"{str(e.get('enabled', True)):<9}"
-          f"{e.get('last_checked_ts', '-')}")
+else:
+    hdr = (f"{'SESSION':<24}{'STATUS':<22}{'COUNT':<7}"
+           f"{'QID':<32}{'ENABLED':<9}{'LAST_CHECKED'}")
+    print(hdr)
+    print("-" * len(hdr))
+    for name, e in sessions.items():
+        qid = e.get("current_question_id") or "-"
+        print(f"{name:<24}{e.get('status', '?'):<22}"
+              f"{e.get('awaiting_user_count', 0):<7}"
+              f"{qid:<32}"
+              f"{str(e.get('enabled', True)):<9}"
+              f"{e.get('last_checked_ts', '-')}")
+
+print()
+print(f"Parked questions: {len(parked)}")
+for p in parked[-5:]:
+    q = (p.get("question") or "").strip()
+    if len(q) > 60:
+        q = q[:57] + "..."
+    print(f"  {p.get('id', '?')}  [{p.get('session', '?')}]  {q}")
+
+print()
+print(f"Backlog items: {len(backlog)}")
+for b in backlog[:5]:
+    t = (b.get("task") or "").strip()
+    if len(t) > 60:
+        t = t[:57] + "..."
+    print(f"  {b.get('id', '?')}  [{b.get('priority', '?')}]  {t}")
 PYEOF
 }
 
