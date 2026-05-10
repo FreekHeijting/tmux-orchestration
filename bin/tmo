@@ -10,6 +10,9 @@ readonly MESSAGES_FILE="$STATE_DIR/messages.jsonl"
 readonly SESSIONS_FILE="$STATE_DIR/sessions.yaml"
 readonly TASKS_FILE="$STATE_DIR/tasks.jsonl"
 readonly ROLES_DIR="${TMO_ROLES_DIR:-$TMO_ROOT/roles}"
+readonly WATCHDOG_STATUS_FILE="$STATE_DIR/orchestrator-status.yaml"
+readonly WATCHDOG_PARKED_FILE="$STATE_DIR/parked-questions.yaml"
+readonly WATCHDOG_BACKLOG_FILE="$STATE_DIR/backlog.yaml"
 
 die() {
     printf 'tmo: error: %s\n' "$*" >&2
@@ -63,6 +66,8 @@ Subcommands:
                         Block until <session> emits <event>
   note <session> <msg>  Soft-inject sidenote into running tmux+claude (queued)
   task <action> ...     Cross-session task tracker (add/list/get/claim/update/done)
+  watchdog <action> ... Cron-driven idle/awaiting-user state-machine
+                        (tick/status/enable/disable)
   bootstrap             End-to-end: init + spawn + roles + attach panes
 
 Run 'tmo <subcommand> --help' for per-subcommand details.
@@ -655,6 +660,209 @@ cmd_task() {
 }
 
 # ---------------------------------------------------------------------------
+# watchdog (cron-driven idle / awaiting-user state-machine)
+# Spec: skills/tmux-orchestration/references/watchdog.md
+# ---------------------------------------------------------------------------
+
+usage_watchdog() {
+    cat <<'EOF'
+tmo watchdog - cron-driven orchestrator state-machine
+
+Usage:
+  tmo watchdog tick <session>      Single tick: classify session, write state, act
+  tmo watchdog status              Show current state for all tracked sessions
+  tmo watchdog enable <session>    Initialize tracking for a session
+  tmo watchdog disable <session>   Stop tracking (entry kept, enabled=false)
+
+Cron entry (recommended):
+  */10 * * * * /home/freek/.local/bin/tmo watchdog tick orchestrator >> /tmp/tmo-watchdog.log 2>&1
+
+State files (under $TMO_STATE_DIR):
+  state/orchestrator-status.yaml   Per-session status, hash, awaiting-user count
+  state/parked-questions.yaml      Questions parked when user does not reply
+  state/backlog.yaml               Backlog items to pick when idle (external write)
+
+State machine (see references/watchdog.md for full table):
+  active             - pane changed since last tick OR busy spinner visible
+  awaiting-user      - open question (trailing ? or [AWAITING-USER]) and no reply
+  idle-no-work       - REPL idle, backlog empty, parked empty
+  idle-with-backlog  - REPL idle, backlog non-empty
+EOF
+}
+
+_wd_yaml_init() {
+    [[ -f "$WATCHDOG_STATUS_FILE" ]] || cat > "$WATCHDOG_STATUS_FILE" <<'EOF'
+# tmo watchdog: per-session orchestrator status
+# Schema: sessions: { <name>: { status, last_pane_hash, awaiting_user_count,
+#                               current_question_id, last_checked_ts,
+#                               last_active_ts, enabled } }
+sessions: {}
+EOF
+    [[ -f "$WATCHDOG_PARKED_FILE" ]] || cat > "$WATCHDOG_PARKED_FILE" <<'EOF'
+# tmo watchdog: parked questions awaiting later resume
+parked: []
+EOF
+    [[ -f "$WATCHDOG_BACKLOG_FILE" ]] || cat > "$WATCHDOG_BACKLOG_FILE" <<'EOF'
+# tmo watchdog: idle-pickup backlog (external producers)
+items: []
+EOF
+}
+
+_wd_status_get() {
+    # _wd_status_get <session> <field>
+    local session="$1" field="$2"
+    python3 - "$WATCHDOG_STATUS_FILE" "$session" "$field" <<'PYEOF'
+import sys, yaml
+path, session, field = sys.argv[1:]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+val = (data.get("sessions") or {}).get(session, {}).get(field)
+print("" if val is None else val)
+PYEOF
+}
+
+_wd_status_update() {
+    # _wd_status_update <session> <status> <pane_hash> <awaiting_count> <question_id>
+    local session="$1" status="$2" pane_hash="$3" count="$4" qid="$5"
+    local now; now="$(iso_ts)"
+
+    python3 - "$WATCHDOG_STATUS_FILE" "$session" "$status" "$pane_hash" "$count" "$qid" "$now" <<'PYEOF'
+import sys, yaml
+path, session, status, pane_hash, count, qid, ts = sys.argv[1:]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+sessions = data.get("sessions") or {}
+entry = sessions.get(session) or {}
+entry["status"] = status
+entry["last_pane_hash"] = pane_hash
+entry["awaiting_user_count"] = int(count)
+entry["current_question_id"] = None if qid in ("", "null") else qid
+entry["last_checked_ts"] = ts
+if status == "active":
+    entry["last_active_ts"] = ts
+entry.setdefault("enabled", True)
+sessions[session] = entry
+data["sessions"] = sessions
+with open(path, "w") as f:
+    yaml.safe_dump(data, f, sort_keys=False)
+PYEOF
+}
+
+cmd_watchdog() {
+    [[ $# -gt 0 ]] || { usage_watchdog; return 0; }
+    require_state
+    _wd_yaml_init
+
+    local sub="$1"; shift
+    case "$sub" in
+        --help|-h) usage_watchdog; return 0 ;;
+        tick)      _wd_tick "$@" ;;
+        status)    _wd_status_show "$@" ;;
+        enable)    _wd_enable "$@" ;;
+        disable)   _wd_disable "$@" ;;
+        *) die "watchdog: unknown action: $sub. Run: tmo watchdog --help" ;;
+    esac
+}
+
+_wd_tick() {
+    [[ $# -ge 1 ]] || die "watchdog tick: session required"
+    local session="$1"
+    local now; now="$(iso_ts)"
+
+    require_cmd tmux
+
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+        printf '[watchdog %s] session not found: %s\n' "$now" "$session" >&2
+        return 1
+    fi
+
+    local enabled; enabled=$(_wd_status_get "$session" "enabled")
+    if [[ "$enabled" == "False" ]]; then
+        printf '[watchdog %s] session=%s disabled, skip\n' "$now" "$session" >&2
+        return 0
+    fi
+
+    # F2 stub: capture pane, hash, write minimal state, log to stderr.
+    # F3 will replace with full classification (active/awaiting-user/idle).
+    local pane pane_hash
+    pane=$(tmux capture-pane -t "${session}:0.0" -p -S -200 2>/dev/null || printf '')
+    pane_hash=$(printf '%s' "$pane" | sha1sum | awk '{print $1}')
+
+    _wd_status_update "$session" "active" "$pane_hash" "0" "null"
+
+    printf '[watchdog %s] session=%s status=active hash=%s (F2 stub)\n' \
+        "$now" "$session" "${pane_hash:0:12}" >&2
+}
+
+_wd_enable() {
+    [[ $# -ge 1 ]] || die "watchdog enable: session required"
+    local session="$1"
+    require_cmd tmux
+    tmux has-session -t "$session" 2>/dev/null \
+        || die "watchdog enable: session not found: $session"
+
+    python3 - "$WATCHDOG_STATUS_FILE" "$session" "$(iso_ts)" <<'PYEOF'
+import sys, yaml
+path, session, ts = sys.argv[1:]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+sessions = data.get("sessions") or {}
+entry = sessions.get(session) or {}
+entry["status"] = "active"
+entry.setdefault("last_pane_hash", "")
+entry["awaiting_user_count"] = 0
+entry["current_question_id"] = None
+entry["last_checked_ts"] = ts
+entry["last_active_ts"] = ts
+entry["enabled"] = True
+sessions[session] = entry
+data["sessions"] = sessions
+with open(path, "w") as f:
+    yaml.safe_dump(data, f, sort_keys=False)
+PYEOF
+    printf 'tmo: watchdog enabled for %s\n' "$session"
+}
+
+_wd_disable() {
+    [[ $# -ge 1 ]] || die "watchdog disable: session required"
+    local session="$1"
+    python3 - "$WATCHDOG_STATUS_FILE" "$session" <<'PYEOF'
+import sys, yaml
+path, session = sys.argv[1:]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+sessions = data.get("sessions") or {}
+if session in sessions:
+    sessions[session]["enabled"] = False
+    data["sessions"] = sessions
+    with open(path, "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+PYEOF
+    printf 'tmo: watchdog disabled for %s\n' "$session"
+}
+
+_wd_status_show() {
+    python3 - "$WATCHDOG_STATUS_FILE" <<'PYEOF'
+import sys, yaml
+path = sys.argv[1]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+sessions = data.get("sessions") or {}
+if not sessions:
+    print("(no sessions tracked)")
+    sys.exit(0)
+hdr = f"{'SESSION':<24}{'STATUS':<22}{'COUNT':<7}{'ENABLED':<9}{'LAST_CHECKED'}"
+print(hdr)
+print("-" * len(hdr))
+for name, e in sessions.items():
+    print(f"{name:<24}{e.get('status', '?'):<22}"
+          f"{e.get('awaiting_user_count', 0):<7}"
+          f"{str(e.get('enabled', True)):<9}"
+          f"{e.get('last_checked_ts', '-')}")
+PYEOF
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -677,6 +885,7 @@ main() {
         wait-for)         cmd_wait_for "$@" ;;
         note)             cmd_note "$@" ;;
         task)             cmd_task "$@" ;;
+        watchdog)         cmd_watchdog "$@" ;;
         bootstrap)        cmd_bootstrap "$@" ;;
         *) die "unknown subcommand: $sub. Run: tmo --help" ;;
     esac
