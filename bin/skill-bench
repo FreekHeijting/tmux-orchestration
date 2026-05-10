@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# skill-bench - Karpathy autoresearch 5-task benchmark scaffold.
+# v0.1.0
+set -euo pipefail
+
+readonly SKILL_BENCH_VERSION="0.1.0"
+
+usage() {
+    cat <<'EOF'
+skill-bench - Karpathy 5-task benchmark harness
+
+Usage:
+  skill-bench gen <target> [out-file]    Generate template (5 empty cases)
+  skill-bench score <bench-file>         Compute pass-rate, exit 0 if >=0.8
+  skill-bench --version | -v
+  skill-bench --help   | -h
+
+Methodology: 5 fixed categories per target:
+  1. typical          - happy path
+  2. edge-case        - boundary input
+  3. anti-pattern     - input that SHOULD be rejected
+  4. ambiguous-scope  - request outside scope (no regression)
+  5. cross-skill      - adjacent feature still works
+
+Threshold: pass-rate >= 0.8 (4/5 PASS, no SKIPs needed). SKIPs excluded
+from denominator. NEVER skip anti-pattern to inflate the score.
+
+Bench yaml location: bench/<target>-<timestamp>.yaml
+Always commit the yaml alongside the feature it benches.
+EOF
+}
+
+iso_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+cmd_gen() {
+    [[ $# -ge 1 ]] || { echo "skill-bench gen: target required" >&2; usage >&2; exit 2; }
+    local target="$1"
+    local out="${2:-}"
+    if [[ -z "$out" ]]; then
+        local base
+        base="$(basename "${target%.*}" 2>/dev/null || basename "$target")"
+        out="bench/${base}-$(date +%Y%m%dT%H%M%S).yaml"
+    fi
+    mkdir -p "$(dirname "$out")"
+    cat > "$out" <<EOF
+# Karpathy autoresearch 5-task benchmark
+# Edit each case: description, expected, actual, verdict (PASS|FAIL|SKIP)
+# After filling, run: skill-bench score $out
+target: "$target"
+created: "$(iso_ts)"
+methodology: karpathy-autoresearch-5task
+graduate-threshold: 0.8
+
+cases:
+  - id: 1
+    category: typical
+    description: ""
+    expected: ""
+    actual: ""
+    verdict: ""
+    notes: ""
+
+  - id: 2
+    category: edge-case
+    description: ""
+    expected: ""
+    actual: ""
+    verdict: ""
+    notes: ""
+
+  - id: 3
+    category: anti-pattern
+    description: ""
+    expected: ""
+    actual: ""
+    verdict: ""
+    notes: ""
+
+  - id: 4
+    category: ambiguous-scope
+    description: ""
+    expected: ""
+    actual: ""
+    verdict: ""
+    notes: ""
+
+  - id: 5
+    category: cross-skill
+    description: ""
+    expected: ""
+    actual: ""
+    verdict: ""
+    notes: ""
+EOF
+    printf 'skill-bench: wrote template -> %s\n' "$out"
+}
+
+cmd_score() {
+    [[ $# -ge 1 ]] || { echo "skill-bench score: bench-file required" >&2; usage >&2; exit 2; }
+    local file="$1"
+    [[ -f "$file" ]] || { echo "skill-bench score: no such file: $file" >&2; exit 2; }
+
+    local pass fail skip total rate threshold
+    pass=$(grep -cE '^\s*verdict:\s*"?PASS"?\s*$' "$file" 2>/dev/null || true)
+    fail=$(grep -cE '^\s*verdict:\s*"?FAIL"?\s*$' "$file" 2>/dev/null || true)
+    skip=$(grep -cE '^\s*verdict:\s*"?SKIP"?\s*$' "$file" 2>/dev/null || true)
+    pass=${pass:-0}; fail=${fail:-0}; skip=${skip:-0}
+    total=$((pass + fail))
+    threshold=$(awk -F': *' '/^graduate-threshold:/ {gsub(/"/,"",$2); print $2; exit}' "$file" 2>/dev/null)
+    [[ -z "$threshold" ]] && threshold="0.8"
+
+    if (( total > 0 )); then
+        rate=$(LC_NUMERIC=C awk -v p=$pass -v t=$total 'BEGIN{printf "%.2f", p/t}')
+    else
+        rate="0.00"
+    fi
+
+    local graduate
+    graduate=$(LC_NUMERIC=C awk -v r="$rate" -v th="$threshold" 'BEGIN{print (r+0 >= th+0) ? "YES" : "NO"}')
+
+    cat <<EOF
+file:             $file
+PASS:             $pass
+FAIL:             $fail
+SKIP:             $skip
+total-judged:     $total
+pass-rate:        $rate
+graduate-threshold: $threshold
+graduate:         $graduate
+EOF
+
+    [[ "$graduate" == "YES" ]] && exit 0 || exit 1
+}
+
+main() {
+    [[ $# -gt 0 ]] || { usage; exit 0; }
+    local sub="$1"; shift
+    case "$sub" in
+        --help|-h)    usage ;;
+        --version|-v) printf 'skill-bench %s\n' "$SKILL_BENCH_VERSION" ;;
+        gen)          cmd_gen "$@" ;;
+        score)        cmd_score "$@" ;;
+        *)            echo "skill-bench: unknown subcommand: $sub" >&2; usage >&2; exit 2 ;;
+    esac
+}
+
+main "$@"

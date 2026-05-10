@@ -1,0 +1,87 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "tmo:orchestrator",
+      "detail": "Main orchestrator session (this Claude session)",
+      "type": "shell",
+      "command": "tmux new-session -A -s orchestrator -c /home/freek/GitHub/tmux-orchestration 'TMO_SESSION=orchestrator TMO_ROLE=orchestrator TMO_STATE_DIR=/home/freek/GitHub/tmux-orchestrator/state claude'",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:debug-orch",
+      "detail": "Sub-orch: T-18 watchdog copy-mode detect",
+      "type": "shell",
+      "command": "tmux new-session -A -s debug-orch -c /home/freek/GitHub/tmo-wt-debug 'TMO_SESSION=debug-orch TMO_ROLE=debug-orch TMO_TASK=T-18 TMO_STATE_DIR=/home/freek/GitHub/tmux-orchestrator/state claude'",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:cleanup-orch",
+      "detail": "Sub-orch: T-23/T-24/T-25 cleanup + reopen mechanic",
+      "type": "shell",
+      "command": "tmux new-session -A -s cleanup-orch -c /home/freek/GitHub/tmo-wt-cleanup 'TMO_SESSION=cleanup-orch TMO_ROLE=cleanup-orch TMO_TASK=T-23 TMO_STATE_DIR=/home/freek/GitHub/tmux-orchestrator/state claude'",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:bench-orch",
+      "detail": "Sub-orch: T-7 tmo task perf bench (1k entries)",
+      "type": "shell",
+      "command": "tmux new-session -A -s bench-orch -c /home/freek/GitHub/tmo-wt-bench 'TMO_SESSION=bench-orch TMO_ROLE=bench-orch TMO_TASK=T-7 TMO_STATE_DIR=/home/freek/GitHub/tmux-orchestrator/state claude'",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:start-sub-orchs",
+      "detail": "Spawn 3 sub-orchs in dedicated terminal tabs",
+      "dependsOn": [
+        "tmo:debug-orch",
+        "tmo:cleanup-orch",
+        "tmo:bench-orch"
+      ],
+      "dependsOrder": "parallel",
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
