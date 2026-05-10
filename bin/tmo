@@ -235,6 +235,11 @@ _apply_statusline() {
         "#[fg=yellow]%H:%M #[fg=white]| #[fg=blue]tmo" \
         2>/dev/null || true
 
+    # explicit status-format[0]: required when status>1 (default falls back to empty)
+    tmux set-option -t "$session" status-format[0] \
+        "#[align=left]#{T;=/#{status-left-length}:status-left}#[align=right]#{T;=/#{status-right-length}:status-right}" \
+        2>/dev/null || true
+
     # 3-line task-banner above main statusline (lines 1-3, line 0 = main)
     tmux set-option -t "$session" status-format[1] \
         "#[align=left,fill=colour234,fg=white] #($tmo_bin headerline $session 1 2>/dev/null)" \
