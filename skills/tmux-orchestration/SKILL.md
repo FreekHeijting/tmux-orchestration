@@ -78,6 +78,7 @@ If `.vscode/tasks.json` does not exist in the workspace: skill writes it (templa
 - ALWAYS default-accept prompt-improver suggestions in worker sessions (auto-respond with the affirmative literal for the configured reply-language: `yes` for English, `ja` for Nederlands, user-supplied for Other). Worker only deviates from this default if the improver suggestion is verifiably wrong (then `fix: <correction>`).
 - NEVER add fallback paths in worker logic ("if X fails, try Y") for code/tasks. Per global CLAUDE.md: root-cause first, fix at the responsible place. The orchestrator-routed fallback for inter-worker comm is the ONE exception, because it has a semantic meaning (peer unreachable = orchestrator-aware).
 - NEVER write a long single-line prompt directly via `send-keys` if it contains newlines. Use `load-buffer` + `paste-buffer` + Enter.
+- ALWAYS detect tmux copy-mode hangs: when a worker pane shows `pane_in_mode == 1` (user scrolled up in the gnome-terminal window) the user may perceive the session as stuck even though the agent is fine. Orchestrator runs `tmux send-keys -t <session> -X cancel` to drop the pane back to live cursor. Never re-spawn the window over a visual-only scroll-state. Watchdog SHOULD include this check per tick (future task).
 
 ## The 8 phases
 
