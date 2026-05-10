@@ -136,6 +136,25 @@ Run `tmux ls` (parse output, ignore errors when no server). For each existing se
 
 Verify: every existing session has an explicit user-decision. No silent re-use, no silent kill.
 
+### Phase 3b - Branching strategy per worker
+
+For each task being dispatched: ALWAYS ask "is this work big enough to live on its own feature-branch?". Default answer YES when ANY of:
+- Multi-phase Karpathy plan with verify-conditions
+- Adds a new CLI subcommand, file, or module
+- Touches >2 files
+- Will be reviewed/merged in a single review
+
+Default answer NO when:
+- Single-line typo / docstring fix
+- Hot-fix on a release branch
+- Sandbox/throwaway test that won't be committed
+
+When YES: instruct worker to `git checkout -b feat/<topic>` (or `fix/`, `docs/`, `refactor/`) before first commit, push branch on first commit (`git push -u origin <branch>`), commit per phase, mention branch in every status report. Top-orchestrator reviews + merges via PR or fast-forward.
+
+When NO: worker commits directly on current branch.
+
+The skill MUST surface this question explicitly to the user once per task-dispatch round. Skipping = reverting to per-worker default which is feature-branch.
+
 ### Phase 4 - Role assignment
 
 For each worker, resolve role:
