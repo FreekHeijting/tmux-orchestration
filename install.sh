@@ -19,6 +19,11 @@ ln -sfn "$REPO_ROOT/bin/tmo" "$LOCAL_BIN/tmo"
 chmod +x "$REPO_ROOT/bin/tmo"
 printf '[1/3] symlink %-18s -> %s\n' "$LOCAL_BIN/tmo" "$REPO_ROOT/bin/tmo"
 
+# 1b. skill-bench CLI symlink
+ln -sfn "$REPO_ROOT/bin/skill-bench" "$LOCAL_BIN/skill-bench"
+chmod +x "$REPO_ROOT/bin/skill-bench"
+printf '      symlink %-18s -> %s\n' "$LOCAL_BIN/skill-bench" "$REPO_ROOT/bin/skill-bench"
+
 # 2. Skill files (overwrites, including SKILL.md and references/)
 mkdir -p "$SKILL_INSTALL/references"
 cp -f "$REPO_ROOT/skills/tmux-orchestration/SKILL.md" "$SKILL_INSTALL/SKILL.md"
