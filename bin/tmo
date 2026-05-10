@@ -771,6 +771,82 @@ _wd_pane_capture() {
     tmux capture-pane -t "${session}:0.0" -p -S -200 2>/dev/null || printf ''
 }
 
+_wd_detect_copy_mode() {
+    # Echoes "1" if pane 0.0 of session is in copy-mode (or any tmux mode),
+    # "0" otherwise. Reads tmux's #{pane_in_mode} format directly so we don't
+    # depend on visible status-text heuristics.
+    local session="$1"
+    tmux display-message -p -t "${session}:0.0" -F '#{pane_in_mode}' 2>/dev/null
+}
+
+_wd_status_set_field() {
+    # Generic single-field setter on sessions.<session>.<field>. Numeric
+    # strings are stored as ints; everything else as the literal string.
+    local session="$1" field="$2" value="$3"
+    python3 - "$WATCHDOG_STATUS_FILE" "$session" "$field" "$value" <<'PYEOF'
+import sys, yaml
+path, session, field, value = sys.argv[1:]
+with open(path) as f:
+    data = yaml.safe_load(f) or {}
+sessions = data.get("sessions") or {}
+entry = sessions.get(session) or {}
+try:
+    entry[field] = int(value)
+except (TypeError, ValueError):
+    entry[field] = value
+sessions[session] = entry
+data["sessions"] = sessions
+with open(path, "w") as f:
+    yaml.safe_dump(data, f, sort_keys=False)
+PYEOF
+}
+
+_wd_handle_copy_mode() {
+    # Detect copy-mode on pane 0.0; if active and not throttled within
+    # TMO_WATCHDOG_TICK_INTERVAL seconds (default 600), log a copy-mode-hang
+    # event to messages.jsonl, send '-X cancel' to drop out, then log a
+    # copy-mode-cancelled event. Persists last_copy_mode_cancel_epoch as the
+    # throttle anchor.
+    #
+    # Returns 0 when copy-mode was detected this tick (caller MUST return
+    # without further classification). Returns 1 when not in copy-mode.
+    local session="$1"
+    local in_mode; in_mode=$(_wd_detect_copy_mode "$session")
+    [[ "$in_mode" == "1" ]] || return 1
+
+    local now_epoch; now_epoch=$(date +%s)
+    local interval="${TMO_WATCHDOG_TICK_INTERVAL:-600}"
+    local last_ts; last_ts=$(_wd_status_get "$session" "last_copy_mode_cancel_epoch")
+    if [[ -n "$last_ts" && "$last_ts" =~ ^[0-9]+$ ]]; then
+        local delta=$(( now_epoch - last_ts ))
+        if (( delta < interval )); then
+            printf '[watchdog %s] session=%s copy-mode detected, throttled (delta=%ss < interval=%ss)\n' \
+                "$(iso_ts)" "$session" "$delta" "$interval" >&2
+            return 0
+        fi
+    fi
+
+    local hang_payload cancel_payload
+    hang_payload=$(jq -cn \
+        --arg session "$session" \
+        --arg detected_at "$(iso_ts)" \
+        '{session:$session, detected_at:$detected_at, signal:"pane_in_mode=1"}')
+    cmd_send "$session" "copy-mode-hang" "$hang_payload" >/dev/null
+
+    tmux send-keys -t "${session}:0.0" -X cancel 2>/dev/null
+
+    cancel_payload=$(jq -cn \
+        --arg session "$session" \
+        --arg cancelled_at "$(iso_ts)" \
+        '{session:$session, cancelled_at:$cancelled_at, action:"send-keys -X cancel"}')
+    cmd_send "$session" "copy-mode-cancelled" "$cancel_payload" >/dev/null
+
+    _wd_status_set_field "$session" "last_copy_mode_cancel_epoch" "$now_epoch"
+
+    printf '[watchdog %s] session=%s copy-mode cancelled\n' "$(iso_ts)" "$session" >&2
+    return 0
+}
+
 _wd_detect_busy() {
     # exit 0 if Claude is actively working. Match patterns that ONLY appear
     # while Claude is generating: "esc to interrupt", "tokens · esc", or the
@@ -959,6 +1035,13 @@ _wd_tick() {
     local enabled; enabled=$(_wd_status_get "$session" "enabled")
     if [[ "$enabled" == "False" ]]; then
         printf '[watchdog %s] session=%s disabled, skip\n' "$now" "$session" >&2
+        return 0
+    fi
+
+    # copy-mode short-circuit: if pane is in copy-mode (pane_in_mode=1), the
+    # capture-pane content is the static scrollback view and busy/idle
+    # classification would be meaningless. Detect, log, cancel, return early.
+    if _wd_handle_copy_mode "$session"; then
         return 0
     fi
 
