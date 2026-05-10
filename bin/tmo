@@ -70,6 +70,9 @@ Subcommands:
                         (tick/status/enable/disable)
   statusline <session>  Print one-line metadata for tmux status-bar
                         (called by tmux status-format on every refresh)
+  cleanup <session>     Persist session-meta into completed task, kill tmux
+                        (requires task verdict=approve)
+  session <action> ...  Closed-session ops (list-closed, reopen, match)
   bootstrap             End-to-end: init + spawn + roles + attach panes
 
 Run 'tmo <subcommand> --help' for per-subcommand details.
@@ -675,10 +678,9 @@ cmd_task() {
         update)
             [[ $# -ge 3 ]] || die "task update: id field value required"
             local id="$1" field="$2" value="$3"
-            case "$field" in
-                subject|desc|status) ;;
-                *) die "task update: field must be subject|desc|status" ;;
-            esac
+            # field name must be a simple identifier (letters, digits, dash, underscore)
+            [[ "$field" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] \
+                || die "task update: field must match [a-zA-Z_][a-zA-Z0-9_-]*, got: $field"
             jq -nc --arg id "$id" --arg f "$field" --arg v "$value" --arg ts "$(iso_ts)" \
                 '{event:"update", id:$id, field:$f, value:$v, ts:$ts}' >> "$TASKS_FILE"
             printf 'tmo: task %s.%s updated\n' "$id" "$field"
@@ -1296,6 +1298,322 @@ cmd_headerline() {
 }
 
 # ---------------------------------------------------------------------------
+# cleanup (T-23): persist session-meta into completed task, then kill tmux session
+# ---------------------------------------------------------------------------
+
+usage_cleanup() {
+    cat <<'EOF'
+tmo cleanup - persist session-meta into completed task, then kill tmux session
+
+Usage:
+  tmo cleanup <session> [--task <id>] [--role-md <path>]
+
+Behavior:
+  1. Find the task owned by <session>. With --task, use that id explicitly.
+  2. HARD GATE: task.status must be 'completed' AND task.verdict must be 'approve'.
+     On violation: refuse with non-zero exit; no destructive action.
+  3. Capture meta (session name, role, cwd, branch, last-sha, all panes) and
+     persist as JSON into the task's desc field.
+  4. tmux kill-session -t <session>.
+
+Used by the top-orchestrator after a sub-orch emits done AND quality-gate APPROVE.
+Reverse: tmo session reopen <task-id>.
+EOF
+}
+
+cmd_cleanup() {
+    local session="" task_id="" role_md=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) usage_cleanup; return 0 ;;
+            --task)    task_id="${2:?--task requires id}"; shift 2 ;;
+            --role-md) role_md="${2:?--role-md requires path}"; shift 2 ;;
+            -*)        die "cleanup: unknown flag: $1" ;;
+            *)
+                if [[ -z "$session" ]]; then
+                    session="$1"; shift
+                else
+                    die "cleanup: unexpected arg: $1"
+                fi
+                ;;
+        esac
+    done
+
+    [[ -n "$session" ]] || die "cleanup: missing <session>. See: tmo cleanup --help"
+
+    require_cmd tmux
+    require_cmd jq
+    require_state
+
+    local session_alive=0
+    tmux has-session -t "$session" 2>/dev/null && session_alive=1
+
+    # Resolve task
+    local task_json=""
+    if [[ -n "$task_id" ]]; then
+        task_json=$(_tasks_replay | jq --arg id "$task_id" '.[] | select(.id == $id)')
+    else
+        task_json=$(_tasks_replay | jq --arg s "$session" '
+            map(select(.owner == $s)) | sort_by(.updated) | reverse | .[0] // empty
+        ')
+    fi
+
+    # Idempotent edge case: session gone AND no task to gate against → nothing to do
+    if [[ -z "$task_json" || "$task_json" == "null" ]]; then
+        if [[ "$session_alive" == "0" ]]; then
+            printf 'tmo: cleanup: session %s not found and no task to update; nothing to do.\n' "$session" >&2
+            return 0
+        fi
+        die "cleanup: no task found for session '$session'. Pass --task <id> explicitly."
+    fi
+
+    task_id=$(printf '%s' "$task_json" | jq -r '.id')
+    local task_status task_verdict
+    task_status=$(printf '%s' "$task_json" | jq -r '.status')
+    task_verdict=$(printf '%s' "$task_json" | jq -r '."verdict" // ""')
+
+    # HARD GATE
+    if [[ "$task_status" != "completed" ]]; then
+        die "cleanup: refuses; task $task_id status='$task_status' (need 'completed'). Run: tmo task done $task_id ..."
+    fi
+    if [[ "$task_verdict" != "approve" ]]; then
+        die "cleanup: refuses; task $task_id verdict='$task_verdict' (need 'approve'). Run: tmo task update $task_id verdict approve"
+    fi
+
+    if [[ "$session_alive" == "0" ]]; then
+        printf 'tmo: cleanup: session %s not found in tmux; nothing to kill. Task %s left as-is.\n' "$session" "$task_id" >&2
+        return 0
+    fi
+
+    # Capture meta
+    local cwd branch last_sha role_env panes_json closed_at
+    cwd=$(tmux display-message -t "$session" -p '#{pane_current_path}' 2>/dev/null || printf '?')
+    branch="-"
+    last_sha="-"
+    if [[ -n "$cwd" && "$cwd" != "?" ]] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+        branch=$(git -C "$cwd" branch --show-current 2>/dev/null || printf '(detached)')
+        [[ -z "$branch" ]] && branch="(detached)"
+        last_sha=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null || printf '-')
+    fi
+    role_env=$(tmux show-environment -t "$session" TMO_ROLE 2>/dev/null | sed -n 's/^TMO_ROLE=//p' || printf '')
+    [[ -z "$role_env" ]] && role_env="-"
+
+    # Resolve role_md if not given: roles/<role>.md under TMO_ROOT (search common locations)
+    if [[ -z "$role_md" && "$role_env" != "-" ]]; then
+        local cand
+        for cand in "$ROLES_DIR/$role_env.md" \
+                    "$HOME/GitHub/tmux-orchestration/roles/$role_env.md" \
+                    "$cwd/roles/$role_env.md"; do
+            if [[ -f "$cand" ]]; then role_md="$cand"; break; fi
+        done
+    fi
+    [[ -z "$role_md" ]] && role_md="-"
+
+    # All panes in session: window_index, pane_index, cwd
+    panes_json=$(tmux list-panes -s -t "$session" -F '#{window_index} #{pane_index} #{pane_current_path}' 2>/dev/null \
+        | jq -R -s 'split("\n") | map(select(length > 0) | split(" ")
+            | {window: (.[0]|tonumber), pane: (.[1]|tonumber), cwd: (.[2:]|join(" "))})' )
+    [[ -z "$panes_json" || "$panes_json" == "null" ]] && panes_json='[]'
+
+    closed_at="$(iso_ts)"
+
+    local meta
+    meta=$(jq -nc \
+        --arg session "$session" \
+        --arg role "$role_env" \
+        --arg cwd "$cwd" \
+        --arg branch "$branch" \
+        --arg last_sha "$last_sha" \
+        --arg role_md "$role_md" \
+        --arg closed_at "$closed_at" \
+        --argjson panes "$panes_json" \
+        --arg task_id "$task_id" \
+        '{schema:"tmo.session-meta.v1", task_id:$task_id, session:$session,
+          role:$role, role_md:$role_md, cwd:$cwd, branch:$branch,
+          last_sha:$last_sha, panes:$panes, closed_at:$closed_at}')
+
+    # Persist meta into task.desc (overwrites prior desc; full reversibility via jsonl replay)
+    jq -nc --arg id "$task_id" --arg f "desc" --arg v "$meta" --arg ts "$(iso_ts)" \
+        '{event:"update", id:$id, field:$f, value:$v, ts:$ts}' >> "$TASKS_FILE"
+    printf 'tmo: cleanup: meta persisted into %s.desc\n' "$task_id"
+
+    # Kill tmux session
+    tmux kill-session -t "$session"
+    printf 'tmo: cleanup: tmux session %s killed\n' "$session"
+
+    # Audit event
+    if [[ -f "$MESSAGES_FILE" ]]; then
+        jq -nc --arg s "$session" --arg id "$task_id" --arg sha "$last_sha" \
+               --arg ts "$closed_at" \
+            '{event:"cleanup", session:$s, task_id:$id, last_sha:$sha, ts:$ts}' \
+            >> "$MESSAGES_FILE"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# session (T-24 reopen, T-25 match, list-closed)
+# ---------------------------------------------------------------------------
+
+usage_session() {
+    cat <<'EOF'
+tmo session - manage closed-session metadata persisted in completed tasks
+
+Usage:
+  tmo session list-closed
+  tmo session reopen <task-id> [--no-terminal] [--no-prompt]
+  tmo session match <prompt-text> [--top <N>]
+
+Subcommands:
+  list-closed   List all completed tasks whose desc holds session-meta.
+  reopen        Re-spawn gnome-terminal + tmux session at original cwd, apply
+                statusline, send [REOPEN] sidenote with sha + role context.
+  match         Score closed-session metas against a prompt; print top-N.
+EOF
+}
+
+# Read meta JSON from a task's desc (validates schema). Outputs JSON or exits 1.
+_session_meta() {
+    local id="$1"
+    local desc
+    desc=$(_tasks_replay | jq -r --arg id "$id" '.[] | select(.id == $id) | .desc // ""')
+    [[ -n "$desc" ]] || return 1
+    printf '%s' "$desc" | jq -e 'select(.schema == "tmo.session-meta.v1")' 2>/dev/null
+}
+
+cmd_session() {
+    [[ $# -gt 0 ]] || { usage_session; return 0; }
+    local sub="$1"; shift
+    case "$sub" in
+        --help|-h)    usage_session; return 0 ;;
+        list-closed)  _sess_list_closed "$@" ;;
+        reopen)       _sess_reopen "$@" ;;
+        match)        _sess_match "$@" ;;
+        *) die "session: unknown action: $sub. Run: tmo session --help" ;;
+    esac
+}
+
+_sess_list_closed() {
+    require_state
+    _tasks_replay | jq -r '
+        .[]
+        | select(.status == "completed" and (.desc // "" | startswith("{") and contains("tmo.session-meta.v1")))
+        | (.desc | fromjson) as $m
+        | "\(.id)\t\($m.session)\t\($m.role)\t\($m.branch)\t\($m.last_sha)\t\($m.closed_at)"
+    '
+}
+
+_sess_reopen() {
+    [[ $# -ge 1 ]] || die "session reopen: <task-id> required"
+    local task_id="$1"; shift
+    local no_terminal=0 no_prompt=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-terminal) no_terminal=1; shift ;;
+            --no-prompt)   no_prompt=1;   shift ;;
+            *) die "session reopen: unknown flag: $1" ;;
+        esac
+    done
+
+    require_cmd tmux
+    require_cmd jq
+    require_state
+
+    local meta
+    meta=$(_session_meta "$task_id") \
+        || die "session reopen: task $task_id has no valid session-meta in desc. Run cleanup first."
+
+    local session role cwd branch last_sha role_md
+    session=$(printf '%s' "$meta" | jq -r '.session')
+    role=$(printf '%s'    "$meta" | jq -r '.role')
+    cwd=$(printf '%s'     "$meta" | jq -r '.cwd')
+    branch=$(printf '%s'  "$meta" | jq -r '.branch')
+    last_sha=$(printf '%s' "$meta" | jq -r '.last_sha')
+    role_md=$(printf '%s' "$meta" | jq -r '.role_md')
+
+    if tmux has-session -t "$session" 2>/dev/null; then
+        die "session reopen: tmux session '$session' already alive. Attach: tmux attach -t $session"
+    fi
+
+    [[ -d "$cwd" ]] || die "session reopen: cwd does not exist: $cwd"
+
+    # Spawn tmux session detached at original cwd. Optionally also a gnome-terminal
+    # window attached to it (skip via --no-terminal for headless use / tests).
+    tmux new-session -d -s "$session" -c "$cwd" \
+        "TMO_SESSION=$session TMO_ROLE=$role TMO_STATE_DIR=$STATE_DIR claude"
+    _apply_statusline "$session" "$role"
+    printf 'tmo: session reopen: tmux session %s created at %s\n' "$session" "$cwd"
+
+    if [[ "$no_terminal" == "0" ]] && command -v gnome-terminal >/dev/null 2>&1; then
+        gnome-terminal --working-directory="$cwd" -- tmux attach -t "$session" >/dev/null 2>&1 &
+        printf 'tmo: session reopen: gnome-terminal attached to %s\n' "$session"
+    fi
+
+    if [[ "$no_prompt" == "0" ]]; then
+        local prompt
+        prompt="[REOPEN] continue from $last_sha on branch $branch. Role: $role ($role_md). Prior task: $task_id done. Read role-md and last 3 commits, then await next task."
+        # Brief delay to let claude REPL spin up before injection
+        ( sleep 3; cmd_note "$session" "$prompt" >/dev/null 2>&1 ) &
+        printf 'tmo: session reopen: [REOPEN] prompt queued for %s\n' "$session"
+    fi
+
+    if [[ -f "$MESSAGES_FILE" ]]; then
+        jq -nc --arg s "$session" --arg id "$task_id" --arg sha "$last_sha" \
+               --arg ts "$(iso_ts)" \
+            '{event:"reopen", session:$s, task_id:$id, last_sha:$sha, ts:$ts}' \
+            >> "$MESSAGES_FILE"
+    fi
+}
+
+_sess_match() {
+    local top=3
+    local query=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --top) top="${2:?--top requires N}"; shift 2 ;;
+            *)
+                if [[ -z "$query" ]]; then
+                    query="$1"; shift
+                else
+                    query="$query $1"; shift
+                fi
+                ;;
+        esac
+    done
+    [[ -n "$query" ]] || die "session match: <prompt-text> required"
+    [[ "$top" =~ ^[1-9][0-9]*$ ]] || die "session match: --top must be positive int"
+
+    require_state
+
+    # Tokenize query: lowercase, split on non-alnum, drop tokens <3 chars
+    local tokens_json
+    tokens_json=$(printf '%s' "$query" | jq -R -c '
+        ascii_downcase | [scan("[a-z0-9]+")] | map(select(length >= 3))
+    ')
+
+    _tasks_replay | jq -r --argjson toks "$tokens_json" --argjson top "$top" '
+        [ .[]
+          | select(.status == "completed"
+                   and (.desc // "" | startswith("{")
+                   and contains("tmo.session-meta.v1")))
+          | (.desc | fromjson) as $m
+          | (.subject + " " + ($m.role // "") + " " + ($m.branch // "")
+             + " " + ($m.session // "")) as $hay
+          | ($hay | ascii_downcase) as $h
+          | { id: .id,
+              session: $m.session,
+              role: $m.role,
+              last_sha: $m.last_sha,
+              score: ([ $toks[] | select(. as $t | $h | contains($t)) ] | length),
+              subject: .subject }
+          | select(.score > 0)
+        ]
+        | sort_by(-.score) | .[0:$top]
+        | .[]
+        | "\(.score)\t\(.id)\t\(.session)\t\(.role)\t\(.last_sha)\t\(.subject)"
+    '
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -1321,6 +1639,8 @@ main() {
         watchdog)         cmd_watchdog "$@" ;;
         statusline)       cmd_statusline "$@" ;;
         headerline)       cmd_headerline "$@" ;;
+        cleanup)          cmd_cleanup "$@" ;;
+        session)          cmd_session "$@" ;;
         bootstrap)        cmd_bootstrap "$@" ;;
         *) die "unknown subcommand: $sub. Run: tmo --help" ;;
     esac
