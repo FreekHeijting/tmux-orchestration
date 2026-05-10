@@ -307,27 +307,50 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ## 6. Supported API surface
 
-To be finalized in phase F6 once empirical evidence is in.
+Final, derived from empirical evidence in section 5 and the live `bin/tmo` implementation.
 
-Stable:
-- Channel A (direct injection sequence in section 1)
-- Channel B (orchestrator forward in section 2)
-- Channel C (jsonl audit log in section 3)
-- Self-identification prefix (section 4)
-- `tmo send` for audit-log + forward
-- `tmo receive` for inbox polling
-- `tmo note <session> <body>` for soft sidenote injection (section 1 wire sequence under the hood)
+### Stable
 
-Experimental:
-- `tmo note --hard` (Esc Esc + inject). Operator-only.
-- Cross-workspace peer-comm via shared `TMO_STATE_DIR`.
+Use these freely in worker logic.
 
-Not supported:
-- Sender-side hard-inject of self
-- Direct injection across hosts (only single-host tmux supported today)
-- Binary payloads via Channel A (text only; for binary use file-paths in payload + Channel C)
+| Surface | Form | Purpose |
+|---|---|---|
+| Channel A | `load-buffer + paste-buffer + sleep 0.2 + send-keys Enter + delete-buffer` (section 1) | Direct peer-injection. Required pre-flight: `tmux has-session` AND capture-pane grep for claude REPL signals (sections 5.3 + 5.6). |
+| Channel B | `tmo send orchestrator forward '{"to":"<peer>","reason":"...","payload":...}'` (section 2) | Fallback when peer is not in claude REPL state. Orchestrator handles. |
+| Channel C | `tmo send <to> <type> '<json>'` writes to `state/messages.jsonl` (section 3) | Audit log. Mandatory pairing with Channel A. |
+| Self-id prefix | `[from <$TMO_SESSION>]` at start of every body (section 4) | Receiver sees who is asking without parsing audit-log. |
+| `tmo send <to> <type> <json>` | append message to `state/messages.jsonl` | Audit-log + Channel B. |
+| `tmo receive [--for <s>] [--type <t>] [--since <ts>]` | read inbox messages | Worker polling. |
+| `tmo note <session> <body>` | soft-inject sidenote (Channel A under the hood with `[SIDENOTE HH:MM]` prefix) | Out-of-band steering, queued during busy. |
+| `tmo note <session> --raw <body>` | soft-inject without `[SIDENOTE]` prefix | When caller controls full prefix (e.g. `[from <self>]`). |
+| Buffer naming `peer-${TMO_SESSION}-$(date +%s%N)` | per-sender, nanosecond-unique buffer name | Prevents 5.5 collision. |
+| Wait-for-ack pattern | `until tmux capture-pane | grep -q "<EXPECTED>"; do sleep 2; done` | Serialize peer-prompts that need turn isolation (per 5.4). |
 
-Cross-references:
-- `skills/tmux-orchestration/SKILL.md` - Phase 6 (Communication protocol) and Phase 4 (Worker spawn) reference Channel A wire sequence
-- `roles/*.md` - every role inherits this protocol; no role-specific override is permitted
-- `bin/tmo` - implementation of `send`, `receive`, `note`, `wait-for`
+### Experimental
+
+These work but are not yet hardened or fully spec'd. Use with caution and explicit user approval.
+
+| Surface | Status | Caveat |
+|---|---|---|
+| `tmo note <session> --hard <body>` | experimental | Sends Esc Esc to abort current tool/turn before injecting. Risky during Write/Edit; can lose receiver work. Operator-only. |
+| Cross-workspace peer-comm via shared `TMO_STATE_DIR` | experimental | All workers point at one state dir (e.g. `/home/freek/GitHub/tmux-orchestrator/state`). Audit log unifies, peer-injection still requires same-host tmux. |
+| `tmo wait-for <session> <event>` | experimental (F5 stub in current `bin/tmo`) | Blocks on inbox event arrival. Implementation is a polling stub today. |
+| `tmo task` subcommands (`add/list/claim/update/done`) | experimental | Cross-session task tracker. Stable enough for orchestrator dispatch but not the focus of this doc. |
+
+### Not supported
+
+These are explicit non-goals. Do not attempt; there is no semantic for them.
+
+- Sender-side hard-inject of self (Esc Esc on own pane). Destructive to current tool-call.
+- Direct injection across hosts. Only same-host tmux is supported.
+- Binary payloads via Channel A. Text only. For binary, write to a file and include the path in a Channel C payload.
+- Last-wins concatenation semantics for rapid-fire prompts (per 5.4 caveat). If you need that, batch into one prompt body.
+
+### Cross-references
+
+- `skills/tmux-orchestration/SKILL.md` - Phase 6 ("Communication protocol") and Phase 4 ("Worker spawn") cite Channel A wire sequence and the load-buffer + paste-buffer + 2-step Enter rule
+- `skills/tmux-orchestration/references/cheatsheet-excerpt.md` - quick-reference for the same wire sequence (kept short for clipboard use)
+- `skills/tmux-orchestration/references/role-evolution-loop.md` - role graduation flow (orthogonal to this doc but referenced from SKILL.md Phase 4b)
+- `roles/orchestrator.md`, `roles/backend.md`, `roles/frontend.md`, `roles/reviewer.md`, `roles/generalist.md` - each role inherits this protocol; no role-specific override is permitted
+- `bin/tmo` - implementation of `send`, `receive`, `note`, `wait-for`, `task`, `spawn`, `bootstrap`
+- `tests/peer-comm/` - repro scripts and capture-pane transcripts for every empirical claim in section 5
