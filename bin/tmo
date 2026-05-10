@@ -222,7 +222,7 @@ _apply_statusline() {
     tmux set-environment -t "$session" TMO_SESSION   "$session"   2>/dev/null || true
     tmux set-environment -t "$session" TMO_ROLE      "$role"      2>/dev/null || true
 
-    tmux set-option -t "$session" status on                 2>/dev/null || true
+    tmux set-option -t "$session" status 4                  2>/dev/null || true
     tmux set-option -t "$session" status-interval 5         2>/dev/null || true
     tmux set-option -t "$session" status-bg colour234       2>/dev/null || true
     tmux set-option -t "$session" status-fg white           2>/dev/null || true
@@ -233,6 +233,17 @@ _apply_statusline() {
         2>/dev/null || true
     tmux set-option -t "$session" status-right \
         "#[fg=yellow]%H:%M #[fg=white]| #[fg=blue]tmo" \
+        2>/dev/null || true
+
+    # 3-line task-banner above main statusline (lines 1-3, line 0 = main)
+    tmux set-option -t "$session" status-format[1] \
+        "#[align=left,fill=colour234,fg=white] #($tmo_bin headerline $session 1 2>/dev/null)" \
+        2>/dev/null || true
+    tmux set-option -t "$session" status-format[2] \
+        "#[align=left,fill=colour234,fg=white] #($tmo_bin headerline $session 2 2>/dev/null)" \
+        2>/dev/null || true
+    tmux set-option -t "$session" status-format[3] \
+        "#[align=left,fill=colour234,fg=white] #($tmo_bin headerline $session 3 2>/dev/null)" \
         2>/dev/null || true
 }
 
@@ -1202,6 +1213,84 @@ cmd_statusline() {
 }
 
 # ---------------------------------------------------------------------------
+# headerline (3-line task banner shown above main statusline)
+# ---------------------------------------------------------------------------
+
+usage_headerline() {
+    cat <<'EOF'
+tmo headerline - print Nth line of a session's task-banner
+
+Usage:
+  tmo headerline <session> [1|2|3]
+
+Lines:
+  1   "T-X: <subject>"           (or "(no claimed task)" when idle)
+  2   "branch=<git-branch> | dir=<basename pwd>"
+  3   "<first sentence of desc>"
+
+Source: tmo task in_progress claimed by <session>, plus tmux
+display-message #{pane_current_path} for git-branch lookup.
+
+Used in tmux status-format[1..3] to render a 3-line banner above the
+main one-line status. Must complete in <100ms (called every refresh).
+EOF
+}
+
+cmd_headerline() {
+    local session="${1:-}"
+    local line="${2:-1}"
+    [[ -n "$session" ]] || { usage_headerline; return 1; }
+
+    local id="-" subject="" desc=""
+    if [[ -f "$TASKS_FILE" ]]; then
+        local data
+        data=$( { _tasks_replay 2>/dev/null | jq -r --arg s "$session" '
+            map(select(.status == "in_progress" and .owner == $s))
+            | sort_by(.updated) | reverse
+            | .[0] // null
+            | if . then "\(.id)\(.subject)\(.desc // "")" else "" end
+        ' 2>/dev/null; } || true )
+        if [[ -n "$data" ]]; then
+            id=$(printf '%s' "$data"     | awk -F$'\x01' '{print $1}')
+            subject=$(printf '%s' "$data"| awk -F$'\x01' '{print $2}')
+            desc=$(printf '%s' "$data"   | awk -F$'\x01' '{print $3}')
+        fi
+    fi
+
+    local pane_path="?" branch="-" dir="?"
+    pane_path=$( { tmux display-message -t "$session" -p '#{pane_current_path}' 2>/dev/null; } || printf '%s' "?" )
+    [[ -z "$pane_path" ]] && pane_path="?"
+    if [[ -d "$pane_path/.git" || -f "$pane_path/.git" ]] || git -C "$pane_path" rev-parse --git-dir >/dev/null 2>&1; then
+        branch=$( { git -C "$pane_path" branch --show-current 2>/dev/null; } || true )
+        [[ -z "$branch" ]] && branch="(detached)"
+    fi
+    dir=$( { basename "$pane_path" 2>/dev/null; } || printf '?' )
+
+    case "$line" in
+        1)
+            if [[ -n "$subject" ]]; then
+                local s="${subject:0:108}"
+                printf '#[fg=white,bold]📋 %s: %s' "$id" "$s"
+            else
+                printf '#[fg=colour245] (no claimed task)'
+            fi
+            ;;
+        2)
+            printf '#[fg=colour38]branch=%s #[fg=white]| #[fg=colour244]dir=%s' "$branch" "$dir"
+            ;;
+        3)
+            local s1
+            s1=$(printf '%s' "$desc" | awk -F'\\. ' '{print $1}' | head -c 115)
+            [[ -z "$s1" ]] && s1=" "
+            printf '#[fg=colour245]%s' "$s1"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -1226,6 +1315,7 @@ main() {
         task)             cmd_task "$@" ;;
         watchdog)         cmd_watchdog "$@" ;;
         statusline)       cmd_statusline "$@" ;;
+        headerline)       cmd_headerline "$@" ;;
         bootstrap)        cmd_bootstrap "$@" ;;
         *) die "unknown subcommand: $sub. Run: tmo --help" ;;
     esac
