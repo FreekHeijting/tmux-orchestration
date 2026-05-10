@@ -164,32 +164,66 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ### 5.1 Peer is mid-thinking (busy-spinner)
 
-- Status: PROVEN
-- Transcript: `tests/peer-comm/01-busy-spinner.log`
+- Status: PROVEN (F2)
+- Transcript: `tests/peer-comm/01-busy-spinner.txt`
+- Repro: `bash tests/peer-comm/01-busy-spinner.sh`
 - Expected: paste lands in input buffer, Enter is queued, prompt submits at next-turn boundary.
-- Observed: <to be filled in F2>
-- Mitigation: none required. Channel A works as documented.
+- Observed:
+  - sender fired peer-prompt at T+2s after busy-trigger, while receiver was rendering token output ("Gesticulating..." spinner)
+  - paste appeared in receiver's input area immediately, visible above the spinner
+  - receiver completed busy-trigger task ("Baked for 8s"), then automatically picked up the queued peer-prompt
+  - receiver replied with `PONG-BUSY-OK` confirming successful pickup
+  - no input loss, no ordering ambiguity, no race
+- Mitigation: none required. Channel A wire sequence works as documented during busy-spinner state.
 
 ### 5.2 Peer is mid-tool-call (Bash running)
 
-- Status: <pending F3>
-- Transcript: `tests/peer-comm/02-tool-call.log`
+- Status: PROVEN (F3)
+- Transcript: `tests/peer-comm/02-tool-call.txt`
+- Repro: `bash tests/peer-comm/02-tool-call.sh`
 - Expected: similar to 5.1, prompt queued until tool-call returns and turn boundary occurs.
-- Observed: <to be filled in F3>
-- Mitigation: <to be filled>
+- Observed:
+  - receiver was running `Bash(bash -lc 'for i in 1..8; do echo tick-$i; sleep 1; done')` for ~8s
+  - peer-prompt injected at T+12s after tool started; tool was clearly mid-flight
+  - paste landed and claude REPL explicitly displayed `Press up to edit queued messages` indicator (more obvious than busy-spinner case)
+  - tool finished; receiver replied `TOOL-DONE` for the original prompt
+  - receiver then auto-picked the queued peer-prompt and replied `PONG-TOOL-OK`
+  - ordering preserved: tool-prompt first, peer-prompt second
+- Mitigation: none required. Channel A wire sequence works during tool-call. Note: the explicit queued-message indicator means a sender can sender-side-detect "queued" state by capture-pane grep for `Press up to edit queued messages` if it needs to confirm queueing.
 
 ### 5.3 Peer just exited claude (REPL gone)
 
-- Status: <pending F4>
-- Transcript: `tests/peer-comm/03-peer-exited.log`
+- Status: PROVEN DANGEROUS (F4)
+- Transcript: `tests/peer-comm/03-peer-exited.txt`
+- Repro: `bash tests/peer-comm/03-peer-exited.sh`
 - Expected: paste lands in bash, Enter executes the body as a shell command. DANGEROUS.
-- Observed: <to be filled in F4>
-- Mitigation: <to be filled in F4>
+- Observed:
+  - receiver pane was at bash prompt `freek@host:~/...$` after `/exit` (claude REPL gone)
+  - Channel A injection still succeeded mechanically: paste appeared on the bash command line, Enter submitted
+  - bash interpreted the payload: `Opdracht '[from' niet gevonden` (command not found error)
+  - benign in this test (payload had no shell-evaluable parts), but a payload starting with `rm`, `curl ... | sh`, redirections (`>file`), or any executable name would EXECUTE
+  - sender had no signal of failure beyond the absence of an audit-log peer-reply; orchestrator can detect via `tmux has-session` + capture-pane grep, but only AFTER the damage is done
+- Mitigation (mandatory, sender-side, BEFORE any Channel A injection):
+  1. `tmux has-session -t "$PEER" 2>/dev/null` must succeed
+  2. capture-pane and verify claude REPL state. Reliable signals in current claude CLI render: a horizontal separator line of `─` characters and a `❯` prompt indicator inside it. A bash prompt looks like `<user>@<host>:<cwd>$` with no separator.
+  3. If detection fails, fall back to Channel B (orchestrator forward) which performs its own pre-flight check and either retries when peer recovers or emits `forward-ack` with `status:"fail"`.
+- Sender pre-flight snippet:
+  ```bash
+  is_claude_repl() {
+    tmux capture-pane -t "$1:0.0" -p -S -5 | grep -qE '^─+$' \
+      && tmux capture-pane -t "$1:0.0" -p -S -5 | grep -qE '^❯ ?$'
+  }
+  if ! is_claude_repl "$PEER"; then
+    tmo send orchestrator forward "..."  # Channel B fallback
+    exit 0
+  fi
+  # ... proceed with Channel A
+  ```
 
 ### 5.4 Multiple peer-prompts in flight to same target within 1 second
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/04-rapid-multi.log`
+- Transcript: `tests/peer-comm/04-rapid-multi.txt`
 - Expected: prompts concatenate in input buffer, single Enter submits combined text. Or last-wins. Need empirical answer.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
@@ -197,7 +231,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.5 Paste-buffer name collision
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/05-buffer-collision.log`
+- Transcript: `tests/peer-comm/05-buffer-collision.txt`
 - Expected: `tmux load-buffer -b <name>` overwrites existing buffer. If two senders use the same name, last-loader's payload wins, first sender's `paste-buffer` injects the wrong content.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
@@ -205,7 +239,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.6 Peer in trust-folder dialog
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/06-trust-dialog.log`
+- Transcript: `tests/peer-comm/06-trust-dialog.txt`
 - Expected: paste goes into the dialog's input, Enter activates the default button or types into the dialog field. Disruptive.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
@@ -213,7 +247,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.7 Peer has different reply-language
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/07-language.log`
+- Transcript: `tests/peer-comm/07-language.txt`
 - Expected: receiver responds in own configured reply-language regardless of sender language. No protocol-level mismatch.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
