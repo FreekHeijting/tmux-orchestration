@@ -222,35 +222,79 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ### 5.4 Multiple peer-prompts in flight to same target within 1 second
 
-- Status: <pending F5>
+- Status: PROVEN with caveat (F5)
 - Transcript: `tests/peer-comm/04-rapid-multi.txt`
-- Expected: prompts concatenate in input buffer, single Enter submits combined text. Or last-wins. Need empirical answer.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Repro: `bash tests/peer-comm/04-rapid-multi.sh`
+- Expected: prompts queue in submission order, FIFO, claude processes one-by-one.
+- Observed:
+  - 3 peer-prompts (RAPID-1, RAPID-2, RAPID-3) fired ~250ms apart
+  - RAPID-1 entered REPL and started processing immediately ("Nesting...")
+  - RAPID-2 and RAPID-3 appeared as queued items under "Press up to edit queued messages"
+  - claude processed and emitted ONE response with `RAPID-ACK-2` and `RAPID-ACK-3`
+  - `RAPID-ACK-1` was NOT visible in the transcript: claude appears to have merged the queued tail or partially absorbed prompt 1 into the queued-batch turn
+  - Lesson: rapid-fire CAN cause apparent ack loss / prompt-merging at queue boundaries
+- Mitigation: serialize peer-prompts via wait-for-ack pattern when each prompt requires its own isolated turn:
+  ```bash
+  send_peer_prompt
+  until tmux capture-pane -t "$PEER:0.0" -p -S -200 | grep -q "$EXPECTED_ACK"; do sleep 2; done
+  send_next_peer_prompt
+  ```
+  Use rapid-fire only for fire-and-forget broadcasts where ack-isolation is not required.
 
 ### 5.5 Paste-buffer name collision
 
-- Status: <pending F5>
+- Status: PROVEN (F5)
 - Transcript: `tests/peer-comm/05-buffer-collision.txt`
-- Expected: `tmux load-buffer -b <name>` overwrites existing buffer. If two senders use the same name, last-loader's payload wins, first sender's `paste-buffer` injects the wrong content.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Repro: `bash tests/peer-comm/05-buffer-collision.sh`
+- Expected: `tmux load-buffer -b <name>` overwrites existing buffer. Last-loader wins.
+- Observed:
+  - sender X: `printf 'PAYLOAD-X' | tmux load-buffer -b shared-name -`
+  - sender Y: `printf 'PAYLOAD-Y' | tmux load-buffer -b shared-name -`
+  - sender X: `tmux paste-buffer -b shared-name`
+  - receiver pane shows `PAYLOAD-Y-from-sender-Y` (Y's content)
+  - X's content silently lost; no warning, no error
+- Mitigation: per-sender + nanosecond-unique buffer names:
+  ```bash
+  BUF="peer-${TMO_SESSION}-$(date +%s%N)"
+  ```
+  This is already mandated in the Channel A wire sequence (section 1) and the audit-log payload includes `buf` so the orchestrator can spot-check uniqueness.
 
 ### 5.6 Peer in trust-folder dialog
 
-- Status: <pending F5>
+- Status: PROVEN DANGEROUS (F5)
 - Transcript: `tests/peer-comm/06-trust-dialog.txt`
+- Repro: `bash tests/peer-comm/06-trust-dialog.sh`
 - Expected: paste goes into the dialog's input, Enter activates the default button or types into the dialog field. Disruptive.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Observed:
+  - dialog active: "Accessing workspace: ... Yes, I trust this folder / No, exit / Enter to confirm · Esc to cancel"
+  - Channel A injection: paste was silently swallowed by the dialog UI (not visible anywhere)
+  - Enter activated the focused option ("Yes, I trust this folder" by default)
+  - dialog accepted; claude proceeded into normal REPL state
+  - peer-prompt LOST; no audit trail of failure beyond absence of a peer-reply
+  - INADVERTENT CONFIRMATION risk: any dialog (trust-folder, permission-grant, destructive-action confirmation) could be auto-accepted by an injection
+- Mitigation: sender pre-flight grep for known dialog headers BEFORE Channel A injection:
+  ```bash
+  if tmux capture-pane -t "$PEER:0.0" -p -S -50 \
+       | grep -qE 'Accessing workspace:|Quick safety check:|Enter to confirm · Esc to cancel'; then
+    tmo send orchestrator forward "..."  # Channel B fallback
+    exit 0
+  fi
+  ```
+  Combine with the section 5.3 mitigation (`is_claude_repl` check). Together they cover bash-prompt and dialog-state.
 
 ### 5.7 Peer has different reply-language
 
-- Status: <pending F5>
+- Status: PROVEN (F5)
 - Transcript: `tests/peer-comm/07-language.txt`
-- Expected: receiver responds in own configured reply-language regardless of sender language. No protocol-level mismatch.
-- Observed: <to be filled in F5>
-- Mitigation: <to be filled in F5>
+- Repro: `bash tests/peer-comm/07-language.sh`
+- Expected: receiver responds in body-content language; English `[from X]` prefix is metadata only.
+- Observed:
+  - sender prefix `[from peercomm-orch]` (English)
+  - body: Dutch ("Beantwoord deze vraag uitsluitend in het Nederlands... Welke kleur is de lucht...")
+  - receiver reply was in Dutch: "Lucht overdag bij helder weer blauw. Komt door Rayleigh-verstrooiing..."
+  - terminator `LANG-NL-OK` returned correctly
+  - prefix did not influence reply-language; body content (and any per-session language config) does
+- Mitigation: none required for protocol. Sender writes body in receiver's expected reply-language (default English; per role-md if specified). Prefix stays English `[from <session>]` regardless.
 
 ### 5.8 Hard-inject (Esc Esc) during sender's own busy state
 
