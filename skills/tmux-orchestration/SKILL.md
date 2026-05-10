@@ -2,9 +2,9 @@
 name: tmux-orchestration
 description: >
   Triggers on "tmux-orchestration", "tmux orchestration", "spawn workers",
-  "start N workers", "orchestrator + workers", "huidige sessie als orchestrator",
-  "huidige sessie wordt orchestrator", "multi-claude orchestration met live sessies",
-  "ik wil meerdere claudes parallel met rollen", "spawn N tmux workers met rol-context".
+  "start N workers", "orchestrator + workers", "current session as orchestrator",
+  "current session becomes orchestrator", "multi-claude orchestration with live sessions",
+  "I want multiple claudes in parallel with roles", "spawn N tmux workers with role-context".
   Use when current Claude session must become a persistent orchestrator that drives N
   named worker-claude sessions in tmux, each with assigned role-md, file-scope, initial
   task, skill-hints, and quality-gate supervision. The skill forces a mandatory question
@@ -60,12 +60,12 @@ If `.vscode/tasks.json` does not exist in the workspace: skill writes it (templa
 - ALWAYS verify spawn success via `capture-pane` per worker before reporting completion.
 - ALWAYS run the quality-gate loop after each worker-output: approve / re-instruct / replace.
 - NEVER kill an existing tmux session without explicit user confirmation. Show the live-session list, ask per-session.
-- NEVER write to a file outside a worker's declared file-scope. Two workers on the same file is forbidden per CLAUDE.md regel 2.
+- NEVER write to a file outside a worker's declared file-scope. Two workers on the same file is forbidden per CLAUDE.md rule 2.
 - PREFER direct peer-injection: worker A places prompt in worker B's REPL via `tmux send-keys` (2-step) so the user sees it happen on screen. ALWAYS pair this with `tmo send` audit-log so `state/messages.jsonl` records the peer-traffic.
 - ALWAYS fall back to orchestrator-routed message when direct peer-injection fails (peer session missing, paste-buffer locked, target not in claude-prompt state). Worker emits `tmo send orchestrator forward '{"to":"<peer>","payload":...}'` and continues with own work.
 - ALWAYS treat `state/messages.jsonl` as the central forum: orchestrator tails it, peer-traffic + status + decisions all land here, immutable append-only audit-trail.
 - NEVER skip the prompt-improver hook in any worker session. If a worker sees `[PROMPT-IMPROVER ACTIVE]` it MUST run the improvement-flow.
-- ALWAYS default-accept prompt-improver suggestions in worker sessions (auto-respond `ja` to the improver). Worker only deviates from this default if the improver suggestion is verifiably wrong (then `fix: <correction>`).
+- ALWAYS default-accept prompt-improver suggestions in worker sessions (auto-respond with the affirmative literal for the configured reply-language: `yes` for English, `ja` for Nederlands, user-supplied for Other). Worker only deviates from this default if the improver suggestion is verifiably wrong (then `fix: <correction>`).
 - NEVER add fallback paths in worker logic ("if X fails, try Y") for code/tasks. Per global CLAUDE.md: root-cause first, fix at the responsible place. The orchestrator-routed fallback for inter-worker comm is the ONE exception, because it has a semantic meaning (peer unreachable = orchestrator-aware).
 - NEVER write a long single-line prompt directly via `send-keys` if it contains newlines. Use `load-buffer` + `paste-buffer` + Enter.
 
@@ -94,9 +94,20 @@ API constraint: `AskUserQuestion` accepts max 4 questions per call, each with 2-
 | # | Question | Header | Options |
 |---|----------|--------|---------|
 | 1 | How many workers? | Worker count | 1 / 2 / 3 / 4-or-5 |
-| 2 | Spawn target? | Spawn target | VS Code panels (default) / losse tmux |
+| 2 | Spawn target? | Spawn target | VS Code panels (default) / standalone tmux |
 | 3 | Skill-hints scan? | Skill scan | Yes (recommended) / Skip |
 | 4 | Quality-gate cadence? | QG cadence | Every worker reply / At sync-points only |
+
+**Stage A2** - reply-language (one extra `AskUserQuestion` call). Repo content is always English, but user-facing replies (orchestrator status, summaries, prompts) can be in the user's preferred language:
+
+| # | Question | Header | Options |
+|---|----------|--------|---------|
+| 1 | Reply language? | Reply language | English / Nederlands / Other |
+
+The chosen language flows into every worker's context-bundle so workers reply in the same language. Worker rule for the prompt-improver default-accept literal adjusts to language:
+- `English` → respond `yes`
+- `Nederlands` → respond `ja`
+- `Other` → ask user once for the affirmative literal in their language, then use it
 
 **Stage B** - one `AskUserQuestion` call with up-to-4 questions, 1 per worker (worker count from Stage A determines how many): role per worker as single-select (`orchestrator` / `backend` / `frontend` / `reviewer`). User picks "Other" + types a custom role-name to trigger new-role-creation in Phase 4.
 
@@ -105,7 +116,7 @@ If N>=5: split Stage B into 2 calls of 4 + 1.
 **Stage C** - regular chat ask (no AskUserQuestion). Orchestrator emits one prompt block:
 
 ```
-Per worker, geef in dit format (1 regel per worker):
+Per worker, provide in this format (1 line per worker):
 worker-1: file-scope=<paths>, workspace=<absolute-path-or-default>, initial-task=<one-paragraph>
 worker-2: file-scope=<paths>, workspace=<absolute-path-or-default>, initial-task=<one-paragraph>
 ...
@@ -177,7 +188,7 @@ Ensure these files/dirs exist in the orchestrator workspace's `state/` dir. Two-
 | Path | Owned by | Purpose |
 |------|----------|---------|
 | `state/messages.jsonl` | `tmo init` | Central forum: append-only event log (orchestrator + workers) |
-| `state/sessions.yaml` | `tmo init` | Sessie-meta + status per worker |
+| `state/sessions.yaml` | `tmo init` | Session metadata + status per worker |
 | `state/inboxes/` | `mkdir -p` | Per-worker filtered inbox dir. Files appended on first send. |
 | `state/locks/` | `mkdir -p` | File-scope claim locks dir |
 
@@ -231,7 +242,7 @@ tmux delete-buffer -b ctx-<name>
 rm /tmp/tmo-bundle-<name>.txt
 ```
 
-#### Mode B - losse tmux (fallback, no VS Code)
+#### Mode B - standalone tmux (fallback, no VS Code)
 
 ```bash
 tmux new-session -d -s <name> -c <workspace> "TMO_SESSION=<name> TMO_STATE_DIR=<orchestrator-state-dir> claude"
@@ -244,7 +255,7 @@ tmux new-session -d -s <name> -c <workspace> "TMO_SESSION=<name> TMO_STATE_DIR=<
 Hold in-memory (do not write to file unless user asks):
 
 1. Worker-table: name | role | workspace | file-scope | initial-task
-2. Dispatch-volgorde: which `tmo send` calls in which order
+2. Dispatch-order: which `tmo send` calls in which order
 3. Sync-points: `tmo wait-for <worker> <event>` calls
 4. Quality-gate criteria per worker (concrete pass/fail conditions)
 5. Skill-hints per worker
@@ -280,6 +291,10 @@ Inject this into each worker as initial prompt (via load-buffer + paste-buffer):
 
 ```
 You are worker <name> with role <role>.
+
+## Reply language
+<English | Nederlands | Other:<literal>> - reply to user in this language. Repo content stays English.
+
 
 ## Workspace
 <absolute-path>

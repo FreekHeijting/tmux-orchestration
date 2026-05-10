@@ -3,11 +3,12 @@
 # F1 skeleton: init, spawn, list-roles, send, receive, wait-for, bootstrap
 set -euo pipefail
 
-readonly TMO_VERSION="0.1.0"
+readonly TMO_VERSION="0.2.0"
 readonly TMO_ROOT="${TMO_ROOT:-$PWD}"
 readonly STATE_DIR="${TMO_STATE_DIR:-$TMO_ROOT/state}"
 readonly MESSAGES_FILE="$STATE_DIR/messages.jsonl"
 readonly SESSIONS_FILE="$STATE_DIR/sessions.yaml"
+readonly TASKS_FILE="$STATE_DIR/tasks.jsonl"
 readonly ROLES_DIR="${TMO_ROLES_DIR:-$TMO_ROOT/roles}"
 
 die() {
@@ -60,6 +61,7 @@ Subcommands:
   receive [--for S]     Read messages addressed to session S (default: $TMO_SESSION)
   wait-for <session> <event>
                         Block until <session> emits <event>
+  task <action> ...     Cross-session task tracker (add/list/get/claim/update/done)
   bootstrap             End-to-end: init + spawn + roles + attach panes
 
 Run 'tmo <subcommand> --help' for per-subcommand details.
@@ -411,6 +413,154 @@ cmd_bootstrap() {
 }
 
 # ---------------------------------------------------------------------------
+# task (event-sourced via tasks.jsonl, collapse-on-read)
+# ---------------------------------------------------------------------------
+
+usage_task() {
+    cat <<'EOF'
+tmo task - cross-session task tracker
+
+Usage:
+  tmo task add <subject> [--desc <text>] [--by <handle>]
+  tmo task list [--status pending|in_progress|completed] [--owner <name>]
+  tmo task get <id>
+  tmo task claim <id> [--by <name>]
+  tmo task update <id> <field> <value>     # subject|desc|status
+  tmo task done <id> [--output <text>]
+
+Storage: state/tasks.jsonl (append-only events). State derived by replay:
+last event per id wins for status/owner; subject/desc updatable.
+
+Events: add | claim | update | done
+
+ID format: T-<n> where n is count of add-events + 1.
+EOF
+}
+
+_tasks_replay() {
+    [[ -f "$TASKS_FILE" ]] || { printf '[]\n'; return; }
+    jq -s '
+        reduce .[] as $e ({};
+            if $e.event == "add" then
+                .[$e.id] = {id:$e.id, subject:$e.subject, desc:($e.desc // ""),
+                            status:"pending", owner:null, created:$e.ts, updated:$e.ts,
+                            output:null, by:($e.by // "unknown")}
+            elif $e.event == "claim" then
+                .[$e.id].owner = $e.owner | .[$e.id].status = "in_progress" | .[$e.id].updated = $e.ts
+            elif $e.event == "update" then
+                .[$e.id][$e.field] = $e.value | .[$e.id].updated = $e.ts
+            elif $e.event == "done" then
+                .[$e.id].status = "completed" | .[$e.id].output = ($e.output // "") | .[$e.id].updated = $e.ts
+            else . end)
+        | [.[]] | sort_by(.id)
+    ' "$TASKS_FILE"
+}
+
+_next_task_id() {
+    local n
+    if [[ -f "$TASKS_FILE" ]]; then
+        n=$(grep -c '"event":"add"' "$TASKS_FILE" 2>/dev/null || printf 0)
+    else
+        n=0
+    fi
+    printf 'T-%d' "$((n + 1))"
+}
+
+cmd_task() {
+    require_state
+    [[ $# -gt 0 ]] || { usage_task; return 0; }
+    local sub="$1"; shift
+    case "$sub" in
+        --help|-h) usage_task; return 0 ;;
+
+        add)
+            local subject="" desc="" by="${TMO_SESSION:-unknown}"
+            [[ $# -gt 0 ]] || die "task add: subject required"
+            subject="$1"; shift
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --desc) desc="$2"; shift 2 ;;
+                    --by)   by="$2";   shift 2 ;;
+                    *) die "task add: unknown flag: $1" ;;
+                esac
+            done
+            local id; id=$(_next_task_id)
+            jq -nc --arg id "$id" --arg s "$subject" --arg d "$desc" \
+                   --arg by "$by" --arg ts "$(iso_ts)" \
+                '{event:"add", id:$id, subject:$s, desc:$d, by:$by, ts:$ts}' \
+                >> "$TASKS_FILE"
+            printf 'tmo: task added %s\n' "$id"
+            ;;
+
+        list)
+            local status_filter="" owner_filter=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --status) status_filter="$2"; shift 2 ;;
+                    --owner)  owner_filter="$2";  shift 2 ;;
+                    *) die "task list: unknown flag: $1" ;;
+                esac
+            done
+            _tasks_replay | jq -r --arg s "$status_filter" --arg o "$owner_filter" '
+                .[]
+                | select(($s == "" or .status == $s)
+                      and ($o == "" or .owner == $o))
+                | "\(.id)\t[\(.status)]\t\(.owner // "-")\t\(.subject)"
+            '
+            ;;
+
+        get)
+            [[ $# -gt 0 ]] || die "task get: id required"
+            _tasks_replay | jq --arg id "$1" '.[] | select(.id == $id)'
+            ;;
+
+        claim)
+            [[ $# -gt 0 ]] || die "task claim: id required"
+            local id="$1"; shift
+            local by="${TMO_SESSION:-unknown}"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --by) by="$2"; shift 2 ;;
+                    *) die "task claim: unknown flag: $1" ;;
+                esac
+            done
+            jq -nc --arg id "$id" --arg owner "$by" --arg ts "$(iso_ts)" \
+                '{event:"claim", id:$id, owner:$owner, ts:$ts}' >> "$TASKS_FILE"
+            printf 'tmo: task %s claimed by %s\n' "$id" "$by"
+            ;;
+
+        update)
+            [[ $# -ge 3 ]] || die "task update: id field value required"
+            local id="$1" field="$2" value="$3"
+            case "$field" in
+                subject|desc|status) ;;
+                *) die "task update: field must be subject|desc|status" ;;
+            esac
+            jq -nc --arg id "$id" --arg f "$field" --arg v "$value" --arg ts "$(iso_ts)" \
+                '{event:"update", id:$id, field:$f, value:$v, ts:$ts}' >> "$TASKS_FILE"
+            printf 'tmo: task %s.%s updated\n' "$id" "$field"
+            ;;
+
+        done)
+            [[ $# -gt 0 ]] || die "task done: id required"
+            local id="$1"; shift
+            local output=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --output) output="$2"; shift 2 ;;
+                    *) die "task done: unknown flag: $1" ;;
+                esac
+            done
+            jq -nc --arg id "$id" --arg out "$output" --arg ts "$(iso_ts)" \
+                '{event:"done", id:$id, output:$out, ts:$ts}' >> "$TASKS_FILE"
+            printf 'tmo: task %s done\n' "$id"
+            ;;
+
+        *) die "task: unknown action: $sub. Run: tmo task --help" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -431,6 +581,7 @@ main() {
         send)             cmd_send "$@" ;;
         receive)          cmd_receive "$@" ;;
         wait-for)         cmd_wait_for "$@" ;;
+        task)             cmd_task "$@" ;;
         bootstrap)        cmd_bootstrap "$@" ;;
         *) die "unknown subcommand: $sub. Run: tmo --help" ;;
     esac

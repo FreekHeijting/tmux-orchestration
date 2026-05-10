@@ -1,6 +1,6 @@
 # Role evolution loop - candidate to stable graduation
 
-Detail-doc voor Phase 4b van tmux-orchestration skill. Houdt SKILL.md core lean.
+Detail doc for Phase 4b of the tmux-orchestration skill. Keeps SKILL.md core lean.
 
 ## ROLE-DEFINITION-FLOW (when user picks "Other" in Phase 4)
 
@@ -20,39 +20,39 @@ Examples: `frappe-backend`, `react-frontend`, `python-data-eng`, `pdf-debugger`,
 
 | # | Question | Options |
 |---|----------|---------|
-| 1 | Domein? | frontend / backend / infra-or-ops / data-or-research |
-| 2 | Output-verify-aanpak? | automated tests / visual screenshots / manual user-review / peer-worker review |
-| 3 | Schrijf/edit-scope omvang? | single-file / single-component / single-package / multi-package |
-| 4 | Inter-worker patroon? | independent / handoff-receiver / handoff-sender / orchestrator-only |
+| 1 | Domain? | frontend / backend / infra-or-ops / data-or-research |
+| 2 | Output verification approach? | automated tests / visual screenshots / manual user-review / peer-worker review |
+| 3 | Write/edit-scope size? | single-file / single-component / single-package / multi-package |
+| 4 | Inter-worker pattern? | independent / handoff-receiver / handoff-sender / orchestrator-only |
 
 ### Stage B - regular chat ask (free-text)
 
 ```
-Voor nieuwe rol, geef in dit format:
+For a new role, provide in this format:
 
-persona: <1-2 zinnen, type expert + mindset>
-stack: <hoofdtech, bv frappe, react, python, nextcloud, pdf, docker, postgres>
+persona: <1-2 sentences, type of expert + mindset>
+stack: <main tech, e.g. frappe, react, python, nextcloud, pdf, docker, postgres>
 responsibilities: <3-5 bullets, concrete deliverables>
-file-scope-pattern: <typische paths/globs deze rol claimt, kommagescheiden>
-tags: <kommagescheiden, bv: frappe, doctype, server-script, restricted-python>
-skills-to-use: <skill-namen of "scan" voor auto-detect>
+file-scope-pattern: <typical paths/globs this role claims, comma-separated>
+tags: <comma-separated, e.g.: frappe, doctype, server-script, restricted-python>
+skills-to-use: <skill-names or "scan" for auto-detect>
 always: <1-3 invariants>
 never: <1-3 antipatterns>
-short-description: <1-regel samenvatting voor frontmatter>
+short-description: <1-line summary for frontmatter>
 ```
 
 Wait for free-text reply, parse it.
 
 ### Stage C - auto-name-proposal via AskUserQuestion
 
-Skill genereert 2-3 kandidaat-namen uit Stage A Q1 + Stage B `stack` + role-type-extract uit responsibilities. Format: `<stack>-<role-type>` kebab-case.
+Skill generates 2-3 candidate names from Stage A Q1 + Stage B `stack` + role-type extracted from responsibilities. Format: `<stack>-<role-type>` kebab-case.
 
-Voorbeelden mapping:
-- domain=backend + stack=frappe + responsibilities-mention="doctype, hooks" → `frappe-backend` of `frappe-doctype-engineer`
-- domain=frontend + stack=react + responsibilities-mention="components, styling" → `react-frontend` of `react-component-author`
-- domain=data-or-research + stack=python + responsibilities-mention="ETL, pipeline" → `python-data-eng` of `python-pipeline-builder`
+Example mappings:
+- domain=backend + stack=frappe + responsibilities-mention="doctype, hooks" → `frappe-backend` or `frappe-doctype-engineer`
+- domain=frontend + stack=react + responsibilities-mention="components, styling" → `react-frontend` or `react-component-author`
+- domain=data-or-research + stack=python + responsibilities-mention="ETL, pipeline" → `python-data-eng` or `python-pipeline-builder`
 
-Show via AskUserQuestion: 3 voorstellen + Other. User picks or overrides.
+Show via AskUserQuestion: 3 proposals + Other. User picks or overrides.
 
 If user-supplied name matches forbidden-generic-list: reject + force re-pick with stack-prefix.
 
@@ -64,7 +64,7 @@ Compose final role-md from Stage A + B + C.
 ---
 name: <stack>-<role-type>
 status: candidate
-description: <1-regel uit Stage B short-description>
+description: <1-line from Stage B short-description>
 stack: <Stage B stack>
 role-type: <extracted: backend|frontend|reviewer|debugger|migrator|tester|docs-writer|ops|data-eng>
 tags: [<comma-list-from-stage-B>]
