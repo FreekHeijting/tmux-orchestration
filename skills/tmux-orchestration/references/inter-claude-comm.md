@@ -178,11 +178,18 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ### 5.2 Peer is mid-tool-call (Bash running)
 
-- Status: <pending F3>
+- Status: PROVEN (F3)
 - Transcript: `tests/peer-comm/02-tool-call.txt`
+- Repro: `bash tests/peer-comm/02-tool-call.sh`
 - Expected: similar to 5.1, prompt queued until tool-call returns and turn boundary occurs.
-- Observed: <to be filled in F3>
-- Mitigation: <to be filled>
+- Observed:
+  - receiver was running `Bash(bash -lc 'for i in 1..8; do echo tick-$i; sleep 1; done')` for ~8s
+  - peer-prompt injected at T+12s after tool started; tool was clearly mid-flight
+  - paste landed and claude REPL explicitly displayed `Press up to edit queued messages` indicator (more obvious than busy-spinner case)
+  - tool finished; receiver replied `TOOL-DONE` for the original prompt
+  - receiver then auto-picked the queued peer-prompt and replied `PONG-TOOL-OK`
+  - ordering preserved: tool-prompt first, peer-prompt second
+- Mitigation: none required. Channel A wire sequence works during tool-call. Note: the explicit queued-message indicator means a sender can sender-side-detect "queued" state by capture-pane grep for `Press up to edit queued messages` if it needs to confirm queueing.
 
 ### 5.3 Peer just exited claude (REPL gone)
 
