@@ -41,3 +41,28 @@ You are the orchestrator of a tmux multi-claude setup. You distribute work acros
 - `tmo broadcast <type> <payload>`: send to all workers at once
 - `tmo wait-for <session> done`: block until worker is finished
 - `tmo receive`: read inbox for status updates from workers
+- `tmo note <session> <msg>`: soft-inject a sidenote into a running worker REPL (queued, non-disruptive)
+
+## Soft-inject playbook (working-memory refresh)
+
+The orchestrator's REPL is single-threaded: between turns Claude does nothing on its own. To stay actively driving the workers, the orchestrator relies on a self-poke mechanic.
+
+Patterns:
+
+- **Self-cron (recommended)**: register a crontab line that pokes this orchestrator session every N minutes. Cache-aware intervals: 240s when actively building, 1200s when slow build, 1800s when idle. Avoid exactly 300s (cache-miss without amortization).
+
+  ```
+  */4 * * * * /home/freek/.local/bin/tmo note orchestrator "tail messages.jsonl, dispatch any approved batches, capture-pane all workers"
+  ```
+
+- **Worker-side ping-back**: workers call `tmo note orchestrator "[from <self>] need decision on X"` when they need attention. Queued in REPL, picked up at next turn boundary.
+
+- **Hard-inject (rare)**: only when current tool-call must abort. `tmo note <session> --hard "..."`. Risky during Write/Edit mid-flight.
+
+Note tag conventions:
+
+- `[SIDENOTE HH:MM]` (auto-prefix) — out-of-band reminder; do not abandon current task
+- `[URGENT]` — pivot priority, may interrupt
+- `[from <peer>]` — peer-Claude prompt (see worker context-bundle)
+
+When soft-injects pile up (3+ unread): switch to worker-driven escalation via `tmo send orchestrator escalate '{...}'` instead — easier to triage from the audit log.

@@ -3,7 +3,7 @@
 # F1 skeleton: init, spawn, list-roles, send, receive, wait-for, bootstrap
 set -euo pipefail
 
-readonly TMO_VERSION="0.2.0"
+readonly TMO_VERSION="0.3.0"
 readonly TMO_ROOT="${TMO_ROOT:-$PWD}"
 readonly STATE_DIR="${TMO_STATE_DIR:-$TMO_ROOT/state}"
 readonly MESSAGES_FILE="$STATE_DIR/messages.jsonl"
@@ -61,6 +61,7 @@ Subcommands:
   receive [--for S]     Read messages addressed to session S (default: $TMO_SESSION)
   wait-for <session> <event>
                         Block until <session> emits <event>
+  note <session> <msg>  Soft-inject sidenote into running tmux+claude (queued)
   task <action> ...     Cross-session task tracker (add/list/get/claim/update/done)
   bootstrap             End-to-end: init + spawn + roles + attach panes
 
@@ -413,6 +414,99 @@ cmd_bootstrap() {
 }
 
 # ---------------------------------------------------------------------------
+# note (soft-inject into running tmux+claude session)
+# ---------------------------------------------------------------------------
+
+usage_note() {
+    cat <<'EOF'
+tmo note - soft-inject a sidenote into a running tmux+claude session
+
+Usage:
+  tmo note <session> <message>           # auto-prefix [SIDENOTE HH:MM]
+  tmo note <session> --raw <message>     # no prefix, raw paste
+  tmo note <session> --hard <message>    # interrupt current tool/turn first (Esc Esc)
+
+Behavior:
+- Soft (default): tmux send-keys text + 2-step Enter. Queued in REPL during
+  busy turn, picked up at next-turn boundary. Non-disruptive.
+- Hard: Esc Esc first to abort current tool, then inject. Risky during Write/Edit.
+
+Multiline messages: use $'line1\nline2' or wrap with `--file <path>`.
+
+Use case:
+- Orchestrator self-poke via cron: `*/4 * * * * tmo note orchestrator "check workers"`
+- Sidekick reminders during long runs.
+- Out-of-band steering without restarting the REPL.
+EOF
+}
+
+cmd_note() {
+    [[ $# -ge 2 ]] || { usage_note; die "note: session and message required"; }
+
+    local session="" mode="soft" file=""
+    local target_check
+    local args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) usage_note; return 0 ;;
+            --raw)     mode="raw";  shift ;;
+            --hard)    mode="hard"; shift ;;
+            --file)    file="$2";   shift 2 ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+
+    [[ ${#args[@]} -ge 1 ]] || die "note: session required"
+    session="${args[0]}"
+    local message="${args[*]:1}"
+
+    [[ -n "$file" || -n "$message" ]] || die "note: message required"
+
+    require_cmd tmux
+    target_check=$(tmux has-session -t "$session" 2>&1) || die "note: session not found: $session ($target_check)"
+
+    local body
+    if [[ -n "$file" ]]; then
+        [[ -f "$file" ]] || die "note: file not found: $file"
+        body=$(<"$file")
+    else
+        body="$message"
+    fi
+
+    if [[ "$mode" == "soft" ]]; then
+        local ts
+        ts=$(date +%H:%M)
+        body="[SIDENOTE $ts] $body"
+    fi
+
+    if [[ "$mode" == "hard" ]]; then
+        tmux send-keys -t "${session}:0.0" Escape Escape
+        sleep 0.3
+    fi
+
+    if [[ "$body" == *$'\n'* ]]; then
+        local buf="tmo-note-$$-$RANDOM"
+        printf '%s' "$body" | tmux load-buffer -b "$buf" -
+        tmux paste-buffer -b "$buf" -t "${session}:0.0"
+        tmux delete-buffer -b "$buf"
+    else
+        tmux send-keys -t "${session}:0.0" "$body"
+    fi
+    sleep 0.2
+    tmux send-keys -t "${session}:0.0" Enter
+
+    if [[ -f "$MESSAGES_FILE" ]]; then
+        jq -nc --arg s "$session" --arg m "$body" --arg mode "$mode" \
+               --arg ts "$(iso_ts)" --arg from "${TMO_SESSION:-cli}" \
+            '{event:"note", from:$from, to:$s, mode:$mode, body:$m, ts:$ts}' \
+            >> "$MESSAGES_FILE"
+    fi
+
+    printf 'tmo: note injected into %s (mode=%s)\n' "$session" "$mode"
+}
+
+# ---------------------------------------------------------------------------
 # task (event-sourced via tasks.jsonl, collapse-on-read)
 # ---------------------------------------------------------------------------
 
@@ -581,6 +675,7 @@ main() {
         send)             cmd_send "$@" ;;
         receive)          cmd_receive "$@" ;;
         wait-for)         cmd_wait_for "$@" ;;
+        note)             cmd_note "$@" ;;
         task)             cmd_task "$@" ;;
         bootstrap)        cmd_bootstrap "$@" ;;
         *) die "unknown subcommand: $sub. Run: tmo --help" ;;
