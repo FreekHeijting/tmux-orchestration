@@ -62,6 +62,7 @@ If `.vscode/tasks.json` does not exist in the workspace: skill writes it (templa
 - NEVER kill an existing tmux session without explicit user confirmation. Show the live-session list, ask per-session.
 - NEVER write to a file outside a worker's declared file-scope. Two workers on the same file is forbidden per CLAUDE.md rule 2.
 - PREFER direct peer-injection: worker A places prompt in worker B's REPL via `tmux send-keys` (2-step) so the user sees it happen on screen. ALWAYS pair this with `tmo send` audit-log so `state/messages.jsonl` records the peer-traffic.
+- ALWAYS self-identify in the injected prompt body, prefix with `[from <$TMO_SESSION>]`. Example: `[from tui-builder] can you confirm the schema for users.role?`. This way the receiver knows which peer is asking without parsing audit-log. Receiver replies with `[from <self>]` prefix as well.
 - ALWAYS fall back to orchestrator-routed message when direct peer-injection fails (peer session missing, paste-buffer locked, target not in claude-prompt state). Worker emits `tmo send orchestrator forward '{"to":"<peer>","payload":...}'` and continues with own work.
 - ALWAYS treat `state/messages.jsonl` as the central forum: orchestrator tails it, peer-traffic + status + decisions all land here, immutable append-only audit-trail.
 - NEVER skip the prompt-improver hook in any worker session. If a worker sees `[PROMPT-IMPROVER ACTIVE]` it MUST run the improvement-flow.
@@ -351,7 +352,7 @@ Worker A places a prompt directly in worker B's claude REPL via tmux. User sees 
 
 ```bash
 # worker-A injects question into worker-B
-PROMPT="Q from worker-A: can you confirm the schema for users.role?"
+PROMPT="[from worker-A] Q: can you confirm the schema for users.role?"
 echo "$PROMPT" | tmux load-buffer -b peer-A-to-B -
 tmux paste-buffer -b peer-A-to-B -t worker-B:0.0
 sleep 0.2
