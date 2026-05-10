@@ -1,0 +1,13 @@
+# Example backlog for tmo watchdog idle-with-backlog action.
+# Copy to state/backlog.yaml.
+items:
+  - id: b-1
+    priority: high
+    task: "review feat/foo PR comments"
+    added_at: 2026-05-10T15:00:00Z
+    claimed_by: null
+  - id: b-2
+    priority: med
+    task: "rebase main into wip-branch"
+    added_at: 2026-05-10T15:30:00Z
+    claimed_by: null

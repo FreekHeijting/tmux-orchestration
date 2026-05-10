@@ -728,10 +728,14 @@ _wd_pane_capture() {
 }
 
 _wd_detect_busy() {
-    # exit 0 if Claude busy spinner or "esc to interrupt" visible
+    # exit 0 if Claude is actively working. Match patterns that ONLY appear
+    # while Claude is generating: "esc to interrupt", "tokens · esc", or the
+    # rotating spinner-glyph followed by a space and a verb. Bare glyphs are
+    # NOT enough: ⏵⏵ shows up in the idle "bypass permissions" status row
+    # and ✶/✻ can appear in markdown bullets, both producing false positives.
     local pane="$1"
     if printf '%s' "$pane" \
-        | grep -qE '✻|✶|✢|✳|✺|⏵|esc to interrupt|Thinking…|tokens · esc'; then
+        | grep -qE 'esc to interrupt|tokens · esc|^[[:space:]]*[✻✶✢✳✺] '; then
         return 0
     fi
     return 1

@@ -1,0 +1,13 @@
+# Schema reference for state/orchestrator-status.yaml. The watchdog
+# auto-creates and maintains this file; do not edit by hand during a
+# live session (concurrent ticks will overwrite).
+sessions:
+  orchestrator:
+    status: active                 # active | awaiting-user | idle-no-work | idle-with-backlog
+    last_pane_hash: 7a3f1c...       # sha1 of last captured pane
+    awaiting_user_count: 0          # consecutive ticks in awaiting-user
+    current_question_id: null       # q-<unix-ts>-<session> while awaiting, else null
+    last_checked_ts: 2026-05-10T16:30:00Z
+    last_active_ts: 2026-05-10T16:25:00Z
+    last_parked_pane_hash: ""       # set after park to suppress re-park on identical pane
+    enabled: true
