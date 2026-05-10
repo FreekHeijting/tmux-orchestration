@@ -81,7 +81,7 @@ Plus `.gitignore` exception: `!.vscode/tasks.json`.
 | File | Format | Purpose |
 |---|---|---|
 | `state/messages.jsonl` | append-only JSON-lines | Central forum / audit-trail |
-| `state/sessions.yaml` | mutable YAML | Sessie-meta + status |
+| `state/sessions.yaml` | mutable YAML | Session metadata + status |
 | `state/inboxes/<name>.jsonl` | append-only | Per-worker filtered inbox |
 | `state/locks/` | empty marker files | File-scope claim locks |
 

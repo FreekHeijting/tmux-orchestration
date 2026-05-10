@@ -87,8 +87,8 @@ In any workspace where you want to orchestrate:
 2. Open Claude Code in a terminal panel
 3. Type a triggering phrase, e.g.:
    - `tmux-orchestration`
-   - `start tmux-orchestration met 2 workers`
-   - `spawn workers met rollen`
+   - `start tmux-orchestration with 2 workers`
+   - `spawn workers with roles`
 4. Skill loads. It runs the 8-phase flow, asks mandatory questions, writes `.vscode/tasks.json`, and tells you to reload the window or run `Tasks: Run Task → tmo:start-all`.
 5. Worker panels open in VS Code. Orchestrator drives them via `tmo send` and direct peer-injection.
 
@@ -104,7 +104,7 @@ tmux-orchestration/
 │   └── plugin.json           plugin manifest
 ├── skills/tmux-orchestration/
 │   ├── SKILL.md              the skill
-│   └── references/           skill-internal naslag
+│   └── references/           skill-internal reference
 ├── roles/                    canonical role library (5 stable + runtime candidates)
 ├── bin/tmo                   CLI binary
 ├── tui/                      rich-based dashboard mockup (tui-rich.py + demo-state.json)

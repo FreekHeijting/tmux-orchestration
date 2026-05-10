@@ -1,8 +1,8 @@
-# Global .graphifyignore template — privacy + noise guard
-# Gebruik: kopieer/symlink naar repo root voor eerste /graphify .
-# Werkt als .gitignore — regels kunnen in repo eigen .graphifyignore overschreven worden
+# Global .graphifyignore template - privacy + noise guard
+# Usage: copy/symlink to the repo root before the first /graphify .
+# Works like .gitignore - rules can be overridden in the repo's own .graphifyignore
 
-# === Privacy (KRITIEK, nooit in graph) ===
+# === Privacy (CRITICAL, never in graph) ===
 PROMPTS.md
 SKILLS_LOG.md
 CLAUDE.local.md
@@ -23,7 +23,7 @@ credentials*
 *.key
 id_rsa*
 
-# === Graphify self-exclusion (voorkom recursieve extractie) ===
+# === Graphify self-exclusion (prevent recursive extraction) ===
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -32,7 +32,7 @@ GEMINI.md
 graphify-out/
 docs/translations/
 
-# === Build/deps (ruis, geen semantiek) ===
+# === Build/deps (noise, no semantics) ===
 node_modules/
 dist/
 build/
@@ -81,4 +81,4 @@ scan_*.pdf
 *.webm
 *.mp3
 *.wav
-# (let op: graphify ondersteunt video/audio via Whisper; weghalen als je die WEL wil graphen)
+# (note: graphify supports video/audio via Whisper; remove these if you DO want to graph them)

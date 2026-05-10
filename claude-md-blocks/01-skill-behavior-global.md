@@ -10,26 +10,26 @@ Purpose: enforce skill behaviors that must hold even when the skill is not activ
 
 ## tmux-orchestration skill behavior
 
-Wanneer de `tmux-orchestration` skill actief is OF wanneer een Claude-sessie als worker draait (`$TMO_SESSION` is gezet), gelden deze regels:
+When the `tmux-orchestration` skill is active OR when a Claude session is running as a worker (`$TMO_SESSION` is set), these rules apply:
 
-### Worker-sessies
+### Worker sessions
 
-- ALWAYS check `$TMO_SESSION` env-var bij sessie-start. Indien gezet: ben je een worker. Lees je context-bundel (eerste user-prompt na claude-startup). Volg het.
-- ALWAYS rapporteer status via `tmo send orchestrator status '{"phase":"working|done|blocked"}'` bij elke fase-overgang.
-- ALWAYS check je inbox eerst: `TMO_SESSION=$TMO_SESSION tmo receive` voor je een nieuwe taak begint.
-- ALWAYS edit alleen binnen je gedeclareerde file-scope. Buiten scope = `tmo send orchestrator blocked` en stop.
-- NEVER spawn additional tmux sessies vanuit een worker.
-- NEVER edit files in een peer worker's file-scope.
-- NEVER skip prompt-improver hooks. Bij `[PROMPT-IMPROVER ACTIVE]`: run improvement-flow, default-respond `ja` (accepteer verbeterde versie).
+- ALWAYS check the `$TMO_SESSION` env var at session start. If set: you are a worker. Read your context bundle (the first user prompt after claude startup). Follow it.
+- ALWAYS report status via `tmo send orchestrator status '{"phase":"working|done|blocked"}'` at every phase transition.
+- ALWAYS check your inbox first: `TMO_SESSION=$TMO_SESSION tmo receive` before starting a new task.
+- ALWAYS edit only inside your declared file-scope. Outside scope = `tmo send orchestrator blocked` and stop.
+- NEVER spawn additional tmux sessions from a worker.
+- NEVER edit files inside a peer worker's file-scope.
+- NEVER skip prompt-improver hooks. On `[PROMPT-IMPROVER ACTIVE]`: run the improvement flow, default-respond `ja` (accept the improved version).
 
-### Inter-worker communicatie
+### Inter-worker communication
 
-- PREFER direct peer-injection: gebruik `tmux load-buffer + paste-buffer + 2-step Enter` om een prompt in peer-worker's pane te plaatsen. ALWAYS koppel met `tmo send <peer> peer-prompt '{"from":"<self>","mode":"direct"}'` voor audit-log.
-- Bij faal van direct peer-injection: ALWAYS fall back via `tmo send orchestrator forward '{"to":"<peer>","payload":...}'`.
-- ALWAYS treat `state/messages.jsonl` als centrale forum + audit-trail.
+- PREFER direct peer-injection: use `tmux load-buffer + paste-buffer + 2-step Enter` to place a prompt in the peer worker's pane. ALWAYS pair with `tmo send <peer> peer-prompt '{"from":"<self>","mode":"direct"}'` for the audit log.
+- On failure of direct peer-injection: ALWAYS fall back via `tmo send orchestrator forward '{"to":"<peer>","payload":...}'`.
+- ALWAYS treat `state/messages.jsonl` as the central forum + audit-trail.
 
-### Quality-gate (orchestrator-zijde)
+### Quality-gate (orchestrator side)
 
-- ALWAYS evalueer worker-output: APPROVE / RE-INSTRUCT / REPLACE.
-- NEVER laat een worker stilzwijgend doorgaan met slechte output.
-- Bij REPLACE: `tmux kill-session` + re-spawn met verbeterde context-bundle.
+- ALWAYS evaluate worker output: APPROVE / RE-INSTRUCT / REPLACE.
+- NEVER let a worker silently continue with bad output.
+- On REPLACE: `tmux kill-session` + re-spawn with an improved context bundle.
