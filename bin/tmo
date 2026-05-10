@@ -68,6 +68,8 @@ Subcommands:
   task <action> ...     Cross-session task tracker (add/list/get/claim/update/done)
   watchdog <action> ... Cron-driven idle/awaiting-user state-machine
                         (tick/status/enable/disable)
+  statusline <session>  Print one-line metadata for tmux status-bar
+                        (called by tmux status-format on every refresh)
   bootstrap             End-to-end: init + spawn + roles + attach panes
 
 Run 'tmo <subcommand> --help' for per-subcommand details.
@@ -198,7 +200,8 @@ cmd_spawn() {
     for ((i=1; i<=n; i++)); do
         name="${prefix}-${i}"
         tmux new-session -d -s "$name" -c "$TMO_ROOT" \
-            "TMO_SESSION=$name TMO_ROLE=$role claude"
+            "TMO_SESSION=$name TMO_ROLE=$role TMO_STATE_DIR=$STATE_DIR claude"
+        _apply_statusline "$name" "$role"
         printf 'tmo: spawned %s (role=%s)\n' "$name" "$role"
 
         # append to sessions.yaml as YAML list item
@@ -206,6 +209,31 @@ cmd_spawn() {
   - { name: "$name", role: "$role", status: "spawned", started_at: "$started_at" }
 EOF
     done
+}
+
+# Apply tmux status-line config to a session (idempotent, safe to re-run).
+_apply_statusline() {
+    local session="$1"
+    local role="$2"
+    local tmo_bin
+    tmo_bin="$(command -v tmo 2>/dev/null || printf '%s' "$0")"
+
+    tmux set-environment -t "$session" TMO_STATE_DIR "$STATE_DIR" 2>/dev/null || true
+    tmux set-environment -t "$session" TMO_SESSION   "$session"   2>/dev/null || true
+    tmux set-environment -t "$session" TMO_ROLE      "$role"      2>/dev/null || true
+
+    tmux set-option -t "$session" status on                 2>/dev/null || true
+    tmux set-option -t "$session" status-interval 5         2>/dev/null || true
+    tmux set-option -t "$session" status-bg colour234       2>/dev/null || true
+    tmux set-option -t "$session" status-fg white           2>/dev/null || true
+    tmux set-option -t "$session" status-left-length 120    2>/dev/null || true
+    tmux set-option -t "$session" status-right-length 60    2>/dev/null || true
+    tmux set-option -t "$session" status-left \
+        "#[fg=cyan,bold] $session #[fg=white]| #[fg=magenta]role=$role #[fg=white]| #($tmo_bin statusline $session 2>/dev/null) " \
+        2>/dev/null || true
+    tmux set-option -t "$session" status-right \
+        "#[fg=yellow]%H:%M #[fg=white]| #[fg=blue]tmo" \
+        2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -1109,6 +1137,71 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# statusline (called from tmux status-format on every refresh — must be fast)
+# ---------------------------------------------------------------------------
+
+usage_statusline() {
+    cat <<'EOF'
+tmo statusline - print one-line metadata for tmux status-bar
+
+Usage:
+  tmo statusline <session>
+
+Output (single line, with #[fg=...] tmux color markup):
+  task=T-X | state=working | peer=N
+
+Intended for use in tmux status-format substitutions:
+  set-option status-left "... #(tmo statusline #S)"
+
+Performance: must complete in <100ms; cache-friendly.
+EOF
+}
+
+cmd_statusline() {
+    local session="${1:-}"
+    [[ -n "$session" ]] || { usage_statusline; return 1; }
+
+    local task_id="-"
+    local state="?"
+    local peer="0"
+
+    # current claimed task by this session (most recent in_progress)
+    if [[ -f "$TASKS_FILE" ]]; then
+        task_id=$(_tasks_replay 2>/dev/null \
+            | jq -r --arg s "$session" '
+                map(select(.status == "in_progress" and .owner == $s))
+                | sort_by(.updated) | reverse
+                | .[0].id // "-"
+            ' 2>/dev/null || printf '%s' "-")
+        [[ -z "$task_id" || "$task_id" == "null" ]] && task_id="-"
+    fi
+
+    # state from sessions.yaml (last entry for this session wins)
+    if [[ -f "$SESSIONS_FILE" ]]; then
+        state=$( { grep -E "name: \"?${session}\"?" "$SESSIONS_FILE" 2>/dev/null \
+            | tail -1 \
+            | grep -oE 'status: "?[a-z_-]+"?' 2>/dev/null \
+            | sed -E 's/status: "?([a-z_-]+)"?/\1/' \
+            | head -1; } || true )
+        [[ -z "$state" ]] && state="?"
+    fi
+
+    # peer-traffic count: messages targeted at this session in last 5 min
+    if [[ -f "$MESSAGES_FILE" ]]; then
+        local cutoff
+        cutoff=$(date -u -d '5 min ago' +%s 2>/dev/null || printf 0)
+        peer=$( { jq -r --arg s "$session" --argjson cutoff "$cutoff" '
+            select(.to == $s and ((.ts // "" | sub("\\..*Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) >= $cutoff))
+            | .ts
+        ' "$MESSAGES_FILE" 2>/dev/null | wc -l | tr -d ' '; } || printf 0 )
+        [[ -z "$peer" ]] && peer="0"
+    fi
+
+    printf '#[fg=yellow]task=%s #[fg=white]| #[fg=green]state=%s #[fg=white]| #[fg=cyan]peer=%s' \
+        "$task_id" "$state" "$peer"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -1132,6 +1225,7 @@ main() {
         note)             cmd_note "$@" ;;
         task)             cmd_task "$@" ;;
         watchdog)         cmd_watchdog "$@" ;;
+        statusline)       cmd_statusline "$@" ;;
         bootstrap)        cmd_bootstrap "$@" ;;
         *) die "unknown subcommand: $sub. Run: tmo --help" ;;
     esac
