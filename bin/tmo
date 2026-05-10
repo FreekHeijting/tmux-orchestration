@@ -842,21 +842,34 @@ _wd_tick() {
     _wd_detect_open_question "$pane" && is_open_q=1
     [[ -n "$prev_hash" && "$pane_hash" != "$prev_hash" ]] && changed=1
 
-    # current count (default 0)
-    local count; count=$(_wd_status_get "$session" "awaiting_user_count")
+    # current count + question id (defaults)
+    local count qid prev_status
+    count=$(_wd_status_get "$session" "awaiting_user_count")
+    qid=$(_wd_status_get "$session" "current_question_id")
+    prev_status=$(_wd_status_get "$session" "status")
     [[ -z "$count" ]] && count=0
 
-    # classify
-    local new_status="" action="none"
+    # classify + question-id lifecycle
+    local new_status="" action="none" new_qid="null"
     if [[ "$is_busy" == "1" || "$changed" == "1" ]]; then
+        # any activity (busy spinner or pane change = user input or claude work)
+        # resets counter and clears tracked question
         new_status="active"
         count=0
+        new_qid="null"
     elif [[ "$is_open_q" == "1" ]]; then
         new_status="awaiting-user"
         count=$((count + 1))
+        # assign q-id on first tick of awaiting-user, keep while open
+        if [[ -z "$qid" || "$prev_status" != "awaiting-user" ]]; then
+            new_qid="q-$(date +%s)-${session}"
+        else
+            new_qid="$qid"
+        fi
         action="log"
         [[ "$count" -ge 2 ]] && action="park-and-pick"
     else
+        new_qid="null"
         local backlog_n; backlog_n=$(_wd_backlog_count)
         if [[ "$backlog_n" -gt 0 ]]; then
             new_status="idle-with-backlog"
@@ -867,10 +880,10 @@ _wd_tick() {
         fi
     fi
 
-    _wd_status_update "$session" "$new_status" "$pane_hash" "$count" "null"
+    _wd_status_update "$session" "$new_status" "$pane_hash" "$count" "$new_qid"
 
-    printf '[watchdog %s] session=%s status=%s count=%s busy=%s changed=%s open_q=%s action=%s\n' \
-        "$now" "$session" "$new_status" "$count" "$is_busy" "$changed" "$is_open_q" "$action" >&2
+    printf '[watchdog %s] session=%s status=%s count=%s qid=%s busy=%s changed=%s open_q=%s action=%s\n' \
+        "$now" "$session" "$new_status" "$count" "$new_qid" "$is_busy" "$changed" "$is_open_q" "$action" >&2
 
     # F5 will wire actions (park-and-pick, prod-backlog) to soft-inject.
 }
