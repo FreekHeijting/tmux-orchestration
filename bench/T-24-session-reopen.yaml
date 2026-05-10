@@ -1,0 +1,61 @@
+# Karpathy bench: T-24 session reopen mechanic
+# Run with:  ./bench/T-24-session-reopen.sh
+# Pass criteria: pass-rate >= 0.8 (>=4/5 cases pass)
+task: T-24
+role: sub-orch-builder
+feature: tmo session reopen <task-id>
+
+cases:
+  - id: typical
+    category: typical
+    desc: |
+      Cleanup a session into task-meta. Then `tmo session reopen <task-id>
+      --no-terminal --no-prompt` re-creates a tmux session of the same
+      name at the original cwd, statusline applied.
+    expected:
+      exit_code: 0
+      tmux_session_alive: true
+      tmux_pane_cwd_matches_meta: true
+      statusline_applied: true
+
+  - id: edge-case-no-meta
+    category: edge-case
+    desc: |
+      Reopen a task that has no session-meta in its desc (e.g. a task
+      that was added but never cleaned up). Expect refusal with clear
+      "no valid session-meta" error.
+    expected:
+      exit_code_nonzero: true
+      stderr_contains: "no valid session-meta"
+
+  - id: anti-pattern-name-collision
+    category: anti-pattern
+    desc: |
+      Cleanup task -> reopen -> the session is now alive. Reopen again
+      while session is still alive. Must refuse (don't clobber an active
+      session).
+    expected:
+      exit_code_nonzero: true
+      stderr_contains: "already alive"
+
+  - id: ambiguous-scope-headless
+    category: ambiguous-scope
+    desc: |
+      Reopen with --no-terminal --no-prompt (headless / CI scenario):
+      tmux session created, no gnome-terminal spawned, no sidenote
+      injected into the REPL.
+    expected:
+      exit_code: 0
+      tmux_session_alive: true
+      no_sidenote_injected: true
+
+  - id: cross-skill-roundtrip
+    category: cross-skill
+    desc: |
+      cleanup -> reopen -> done+approve -> cleanup. Full roundtrip:
+      meta.last_sha gets re-persisted and tmux dies again on second
+      cleanup. No data loss.
+    expected:
+      exit_code: 0
+      tmux_session_alive: false
+      meta_present_after_second_cleanup: true
