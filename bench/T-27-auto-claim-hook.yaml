@@ -1,0 +1,46 @@
+# Karpathy autoresearch 5-task benchmark for SessionStart auto-claim hook
+target: "hooks/scripts/sub-orch-claim.sh"
+created: "2026-05-10T18:30:00Z"
+methodology: karpathy-autoresearch-5task
+graduate-threshold: 0.8
+
+cases:
+  - id: 1
+    category: typical
+    description: "TMO_TASK=T-1 (existing) + TMO_SESSION=test-orch + valid TMO_STATE_DIR -> hook auto-claims"
+    expected: "exit=0, T-1 status=in_progress, owner=test-orch"
+    actual: "ran hook with TMO_TASK=T-1, then `tmo task get T-1` -> status: 'in_progress' owner: 'test-orch'. exit=0."
+    verdict: PASS
+    notes: "evidence: status=in_progress + owner=test-orch confirmed via tmo task get."
+
+  - id: 2
+    category: edge-case
+    description: "TMO_TASK set but TMO_SESSION empty -> silent exit 0, no claim"
+    expected: "exit=0, no new event in tasks.jsonl"
+    actual: "ran hook with TMO_SESSION='', exit=0. The early guard '[[ -n TMO_SESSION ]] || exit 0' triggered."
+    verdict: PASS
+    notes: "guard at top of hook prevents any tmo task claim invocation."
+
+  - id: 3
+    category: anti-pattern
+    description: "TMO_TASK=T-99 (nonexistent) -> hook must NOT add a bogus claim event that would surface as 'null' entry in tmo task list"
+    expected: "exit=0, tasks.jsonl line-count unchanged, no 'null' row in tmo task list"
+    actual: "first run: delta=1 (FAIL). Added pre-flight grep for add-event existence. Re-ran: delta=0. tmo task list shows only T-1, no null."
+    verdict: PASS
+    notes: "iteration: pre-flight 'grep add-event for $TMO_TASK; exit 0 if missing' added before claim. Verified on re-run."
+
+  - id: 4
+    category: ambiguous-scope
+    description: "TMO_STATE_DIR empty -> hook does nothing, doesn't crash"
+    expected: "exit=0, no error, no state mutation anywhere"
+    actual: "ran hook with TMO_STATE_DIR='', exit=0. Guard triggered, no further code executed."
+    verdict: PASS
+    notes: "guard '[[ -n TMO_STATE_DIR ]] || exit 0' is third in chain, all guards correctly short-circuit."
+
+  - id: 5
+    category: cross-skill
+    description: "after sub-orch-claim hook fires, the existing UserPromptSubmit auto-task-add hook still works"
+    expected: "auto-task-add.sh still adds T-X for new prompts, no shared-state corruption"
+    actual: "ran auto-task-add.sh with stub prompt, exit=0. tmo task list shows new T-2 added by user-prompt-submit-hook. No conflict."
+    verdict: PASS
+    notes: "the two hooks share the state-dir but write distinct jsonl events (claim vs add); no race observed in synchronous test."
