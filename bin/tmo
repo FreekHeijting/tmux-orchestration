@@ -1056,23 +1056,51 @@ PYEOF
 }
 
 _wd_status_show() {
-    python3 - "$WATCHDOG_STATUS_FILE" <<'PYEOF'
+    python3 - "$WATCHDOG_STATUS_FILE" "$WATCHDOG_PARKED_FILE" "$WATCHDOG_BACKLOG_FILE" <<'PYEOF'
 import sys, yaml
-path = sys.argv[1]
-with open(path) as f:
-    data = yaml.safe_load(f) or {}
-sessions = data.get("sessions") or {}
+status_path, parked_path, backlog_path = sys.argv[1:4]
+
+with open(status_path) as f:
+    status = yaml.safe_load(f) or {}
+with open(parked_path) as f:
+    parked_data = yaml.safe_load(f) or {}
+with open(backlog_path) as f:
+    backlog_data = yaml.safe_load(f) or {}
+
+sessions = status.get("sessions") or {}
+parked = parked_data.get("parked") or []
+backlog = backlog_data.get("items") or []
+
 if not sessions:
     print("(no sessions tracked)")
-    sys.exit(0)
-hdr = f"{'SESSION':<24}{'STATUS':<22}{'COUNT':<7}{'ENABLED':<9}{'LAST_CHECKED'}"
-print(hdr)
-print("-" * len(hdr))
-for name, e in sessions.items():
-    print(f"{name:<24}{e.get('status', '?'):<22}"
-          f"{e.get('awaiting_user_count', 0):<7}"
-          f"{str(e.get('enabled', True)):<9}"
-          f"{e.get('last_checked_ts', '-')}")
+else:
+    hdr = (f"{'SESSION':<24}{'STATUS':<22}{'COUNT':<7}"
+           f"{'QID':<32}{'ENABLED':<9}{'LAST_CHECKED'}")
+    print(hdr)
+    print("-" * len(hdr))
+    for name, e in sessions.items():
+        qid = e.get("current_question_id") or "-"
+        print(f"{name:<24}{e.get('status', '?'):<22}"
+              f"{e.get('awaiting_user_count', 0):<7}"
+              f"{qid:<32}"
+              f"{str(e.get('enabled', True)):<9}"
+              f"{e.get('last_checked_ts', '-')}")
+
+print()
+print(f"Parked questions: {len(parked)}")
+for p in parked[-5:]:
+    q = (p.get("question") or "").strip()
+    if len(q) > 60:
+        q = q[:57] + "..."
+    print(f"  {p.get('id', '?')}  [{p.get('session', '?')}]  {q}")
+
+print()
+print(f"Backlog items: {len(backlog)}")
+for b in backlog[:5]:
+    t = (b.get("task") or "").strip()
+    if len(t) > 60:
+        t = t[:57] + "..."
+    print(f"  {b.get('id', '?')}  [{b.get('priority', '?')}]  {t}")
 PYEOF
 }
 
