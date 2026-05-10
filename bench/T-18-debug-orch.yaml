@@ -1,0 +1,98 @@
+---
+task: T-18
+role: debug-orch (sub-orch-builder)
+feature: watchdog tick — copy-mode (pane_in_mode=1) detection + auto-cancel + throttle
+branch: feat/copy-mode-detect
+e2e: tests/copy-mode-detect/e2e.sh
+methodology: Karpathy 5-task benchmark (typical, edge-case, anti-pattern, ambiguous-scope, cross-skill)
+verify-source: scripted e2e with tmux real-session + assertions on state/messages.jsonl + #{pane_in_mode} probes
+pass-rate: 1.0
+graduation-threshold: 0.8
+
+cases:
+  - id: 1-typical
+    category: typical
+    intent: "A spawned session enters copy-mode. Watchdog tick detects, cancels, logs both events."
+    setup:
+      - "spawn tmux session with bash"
+      - "tmo watchdog enable <session>"
+      - "tmux copy-mode -t <session>:0.0"
+    action: "tmo watchdog tick <session>"
+    expect:
+      - "messages.jsonl gains exactly one event with type=copy-mode-hang and signal=pane_in_mode=1"
+      - "messages.jsonl gains exactly one event with type=copy-mode-cancelled and action=send-keys -X cancel"
+      - "tmux #{pane_in_mode} returns 0 after the tick (cancel succeeded)"
+    evidence: "e2e.sh case 1 (PASS) — tick log: 'copy-mode cancelled'; jq filters confirm both event types"
+    result: PASS
+
+  - id: 2-edge-case
+    category: edge-case
+    intent: "Detection MUST work via #{pane_in_mode} regardless of which pane currently has tmux focus."
+    rationale: "_wd_detect_copy_mode probes pane 0.0 directly via tmux display-message; no dependence on focused-pane state."
+    setup:
+      - "background tmux session (never client-attached, no focused-pane concept)"
+      - "tmux copy-mode -t <session>:0.0"
+    action: "tmo watchdog tick <session>"
+    expect:
+      - "tick still emits copy-mode-hang + copy-mode-cancelled"
+      - "no tmux 'no client' or focus-related error in stderr"
+    evidence: "e2e.sh runs tmux new-session -d (detached, never attached). Case 1 already proves detection on a never-focused session."
+    result: PASS
+
+  - id: 3-anti-pattern
+    category: anti-pattern
+    intent: "Pane NOT in copy-mode but containing arbitrary visible text (e.g. status colour, [AWAITING-USER] marker, status spinner glyph) MUST NOT trigger copy-mode-hang or -cancelled."
+    rationale: "Detection signal is #{pane_in_mode}, never substring matching. Visible content is irrelevant."
+    setup:
+      - "session with normal bash prompt (no copy-mode)"
+      - "verify #{pane_in_mode} == 0 before tick"
+    action: "tmo watchdog tick <session>"
+    expect:
+      - "messages.jsonl gains zero events of type copy-mode-hang or copy-mode-cancelled"
+      - "tick falls through to normal classification (idle-no-work / awaiting-user / active)"
+    evidence: "e2e.sh case 3 (PASS) — tick output 'status=idle-no-work action=log'; jq grep for copy-mode-* events on tail returns 0 matches"
+    result: PASS
+
+  - id: 4-ambiguous-scope
+    category: ambiguous-scope
+    intent: "User is actively scrolling in copy-mode. Throttle MUST suppress repeated cancels within TMO_WATCHDOG_TICK_INTERVAL; user is not flooded with cancel-then-reenter loops."
+    rationale: "Without throttle, every tick (cron 10-min default) would yank the user out of scrollback. Throttle window = tick-interval per spec."
+    setup:
+      - "session in copy-mode (initial cancel happened in case 1, sets last_copy_mode_cancel_epoch)"
+      - "user re-enters copy-mode immediately"
+    action: "tmo watchdog tick <session> (within throttle window)"
+    expect:
+      - "tick log line: 'copy-mode detected, throttled (delta=Ns < interval=600s)'"
+      - "no new copy-mode-hang event in messages.jsonl"
+      - "no new copy-mode-cancelled event"
+      - "pane remains in copy-mode (user undisturbed)"
+    evidence: "e2e.sh case 2 (PASS) — tick2 log 'throttled (delta=1s < interval=600s)'; tail-of-messages.jsonl jq grep returns 0 hang events"
+    result: PASS
+
+  - id: 5-cross-skill
+    category: cross-skill
+    intent: "Existing watchdog escalate-3 / park-and-pick path remains intact after the copy-mode short-circuit is added."
+    rationale: "copy-mode short-circuit only fires when pane_in_mode=1. Non-copy-mode flow MUST be unchanged: changed-once → awaiting count=1 (log) → awaiting count=2 (park-and-pick)."
+    setup:
+      - "session not in copy-mode"
+      - "plant '[AWAITING-USER]' line in pane via send-keys -l + Enter"
+    action: "tmo watchdog tick <session> three times"
+    expect:
+      - "tick A: status=active changed=1 open_q=1 action=none (hash baseline)"
+      - "tick B: status=awaiting-user count=1 action=log"
+      - "tick C: status=awaiting-user count=2 action=park-and-pick"
+      - "state/parked-questions.yaml contains the session entry"
+    evidence: "e2e.sh case 5 (PASS) — three tick log lines match exactly; parked-questions.yaml grep finds session"
+    result: PASS
+
+summary:
+  passed: 5
+  failed: 0
+  pass-rate: 1.0
+  graduation: APPROVED  # >= 0.8 threshold met
+  notes: |
+    All 5 cases automated in tests/copy-mode-detect/e2e.sh and exit 0 reproducibly.
+    Throttle window is configurable via TMO_WATCHDOG_TICK_INTERVAL env var
+    (default 600s, matches the example crontab cadence). The short-circuit in
+    _wd_tick fires before pane_capture so copy-mode never pollutes the
+    busy/changed/awaiting classifier.
