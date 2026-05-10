@@ -164,16 +164,22 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ### 5.1 Peer is mid-thinking (busy-spinner)
 
-- Status: PROVEN
-- Transcript: `tests/peer-comm/01-busy-spinner.log`
+- Status: PROVEN (F2)
+- Transcript: `tests/peer-comm/01-busy-spinner.txt`
+- Repro: `bash tests/peer-comm/01-busy-spinner.sh`
 - Expected: paste lands in input buffer, Enter is queued, prompt submits at next-turn boundary.
-- Observed: <to be filled in F2>
-- Mitigation: none required. Channel A works as documented.
+- Observed:
+  - sender fired peer-prompt at T+2s after busy-trigger, while receiver was rendering token output ("Gesticulating..." spinner)
+  - paste appeared in receiver's input area immediately, visible above the spinner
+  - receiver completed busy-trigger task ("Baked for 8s"), then automatically picked up the queued peer-prompt
+  - receiver replied with `PONG-BUSY-OK` confirming successful pickup
+  - no input loss, no ordering ambiguity, no race
+- Mitigation: none required. Channel A wire sequence works as documented during busy-spinner state.
 
 ### 5.2 Peer is mid-tool-call (Bash running)
 
 - Status: <pending F3>
-- Transcript: `tests/peer-comm/02-tool-call.log`
+- Transcript: `tests/peer-comm/02-tool-call.txt`
 - Expected: similar to 5.1, prompt queued until tool-call returns and turn boundary occurs.
 - Observed: <to be filled in F3>
 - Mitigation: <to be filled>
@@ -181,7 +187,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.3 Peer just exited claude (REPL gone)
 
 - Status: <pending F4>
-- Transcript: `tests/peer-comm/03-peer-exited.log`
+- Transcript: `tests/peer-comm/03-peer-exited.txt`
 - Expected: paste lands in bash, Enter executes the body as a shell command. DANGEROUS.
 - Observed: <to be filled in F4>
 - Mitigation: <to be filled in F4>
@@ -189,7 +195,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.4 Multiple peer-prompts in flight to same target within 1 second
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/04-rapid-multi.log`
+- Transcript: `tests/peer-comm/04-rapid-multi.txt`
 - Expected: prompts concatenate in input buffer, single Enter submits combined text. Or last-wins. Need empirical answer.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
@@ -197,7 +203,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.5 Paste-buffer name collision
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/05-buffer-collision.log`
+- Transcript: `tests/peer-comm/05-buffer-collision.txt`
 - Expected: `tmux load-buffer -b <name>` overwrites existing buffer. If two senders use the same name, last-loader's payload wins, first sender's `paste-buffer` injects the wrong content.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
@@ -205,7 +211,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.6 Peer in trust-folder dialog
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/06-trust-dialog.log`
+- Transcript: `tests/peer-comm/06-trust-dialog.txt`
 - Expected: paste goes into the dialog's input, Enter activates the default button or types into the dialog field. Disruptive.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
@@ -213,7 +219,7 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 ### 5.7 Peer has different reply-language
 
 - Status: <pending F5>
-- Transcript: `tests/peer-comm/07-language.log`
+- Transcript: `tests/peer-comm/07-language.txt`
 - Expected: receiver responds in own configured reply-language regardless of sender language. No protocol-level mismatch.
 - Observed: <to be filled in F5>
 - Mitigation: <to be filled in F5>
