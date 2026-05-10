@@ -1,0 +1,72 @@
+# Karpathy bench for T-7 (sub-orch bench-orch)
+#
+# Each case has a command (run from repo root) and a verify expression.
+# The driver `tests/perf/run-cases.sh` executes commands, evaluates the
+# verify expression with the captured stdout/exit-code/runtime, and
+# reports pass-rate.
+#
+# Pass criterion per role: pass-rate >= 0.8 (>= 4/5).
+
+task: T-7
+role: sub-orch-builder
+name: bench-orch
+
+cases:
+  # ---------------------------------------------------------------
+  # 1. typical: full N=1000 bench completes under 60s wall-clock.
+  # ---------------------------------------------------------------
+  - id: typical
+    description: N=1000 bench finishes in <60s, returns one CSV row.
+    command: examples/perf/run-bench.sh 1000
+    expect:
+      exit_code: 0
+      stdout_contains: "1000,"
+      runtime_under_s: 60
+
+  # ---------------------------------------------------------------
+  # 2. edge-case: N=1 smoke test, percentile math survives n=1.
+  # ---------------------------------------------------------------
+  - id: edge_case
+    description: N=1 produces valid stats, no division-by-zero or NaN.
+    command: examples/perf/run-bench.sh 1
+    expect:
+      exit_code: 0
+      stdout_contains: "1,"
+      stdout_not_contains: "nan"
+
+  # ---------------------------------------------------------------
+  # 3. anti-pattern: corrupted tasks.jsonl line.
+  # Driver injects a non-JSON line into a tmp tasks.jsonl, then runs
+  # the raw jq replay (the bench's inner kernel). Exit code MUST be
+  # non-zero (jq parse error) and the harness MUST NOT keep going
+  # silently. We check the test harness fails fast, not crashes.
+  # ---------------------------------------------------------------
+  - id: anti_pattern
+    description: Corrupted tasks.jsonl makes jq replay fail loudly (non-zero exit), no silent-pass.
+    command: tests/perf/_corrupt-replay.sh
+    expect:
+      exit_code_nonzero: true
+      stdout_or_stderr_contains: "parse error"
+
+  # ---------------------------------------------------------------
+  # 4. ambiguous-scope: bench is hermetic. After running the bench
+  # the live $TMO_STATE_DIR/tasks.jsonl must contain ZERO bench
+  # entries (string "bench-task-").
+  # ---------------------------------------------------------------
+  - id: ambiguous_scope
+    description: Bench never writes to live state-dir.
+    command: tests/perf/_hermetic-check.sh
+    expect:
+      exit_code: 0
+      stdout_contains: "HERMETIC_OK"
+
+  # ---------------------------------------------------------------
+  # 5. cross-skill: after bench, real `tmo task list` still works
+  # against the live state-dir (T-7 must appear, status in_progress).
+  # ---------------------------------------------------------------
+  - id: cross_skill
+    description: After bench, `tmo task list` on the real state-dir still works and shows T-7.
+    command: tmo task list
+    expect:
+      exit_code: 0
+      stdout_contains: "T-7"
