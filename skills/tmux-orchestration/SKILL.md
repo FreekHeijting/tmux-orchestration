@@ -65,6 +65,15 @@ If `.vscode/tasks.json` does not exist in the workspace: skill writes it (templa
 - ALWAYS self-identify in the injected prompt body, prefix with `[from <$TMO_SESSION>]`. Example: `[from tui-builder] can you confirm the schema for users.role?`. This way the receiver knows which peer is asking without parsing audit-log. Receiver replies with `[from <self>]` prefix as well.
 - ALWAYS fall back to orchestrator-routed message when direct peer-injection fails (peer session missing, paste-buffer locked, target not in claude-prompt state). Worker emits `tmo send orchestrator forward '{"to":"<peer>","payload":...}'` and continues with own work.
 - ALWAYS treat `state/messages.jsonl` as the central forum: orchestrator tails it, peer-traffic + status + decisions all land here, immutable append-only audit-trail.
+- ALWAYS use `tmo task` as the single source of truth for every actionable work-item across the orchestration. Lifecycle is mandatory:
+  1. Orchestrator dispatches a sub-task: `tmo task add "<subject>" --by orchestrator` BEFORE bundle-injection. Capture the returned `T-<id>`.
+  2. Worker context-bundle MUST include a `## tmo task ID\nT-<id>` section so the worker knows which task to claim.
+  3. Worker first action after consuming bundle: `tmo task claim T-<id> --by <self>`.
+  4. Worker per phase: `tmo task update T-<id> status in_progress` (or whatever the phase reports).
+  5. Worker on completion: `tmo task done T-<id> --output "<sha or summary>"`.
+  6. Quality-gate verdict: orchestrator runs `tmo task update T-<id> status approved` (or `rejected`) AFTER reviewing.
+  Watchdog backlog reads `tmo task list --status pending`; if a task lives only as a Claude session-local TaskCreate item and not in `tmo task`, idle pickup is broken. Therefore: `tmo task` events MUST exist for every work-item.
+- NEVER use Claude Code's session-local TaskCreate as the only tracker for plugin work. Session-local UI is fine, but every plugin action MUST also exist in `tmo task`. If they diverge: `tmo task` wins.
 - NEVER skip the prompt-improver hook in any worker session. If a worker sees `[PROMPT-IMPROVER ACTIVE]` it MUST run the improvement-flow.
 - ALWAYS default-accept prompt-improver suggestions in worker sessions (auto-respond with the affirmative literal for the configured reply-language: `yes` for English, `ja` for Nederlands, user-supplied for Other). Worker only deviates from this default if the improver suggestion is verifiably wrong (then `fix: <correction>`).
 - NEVER add fallback paths in worker logic ("if X fails, try Y") for code/tasks. Per global CLAUDE.md: root-cause first, fix at the responsible place. The orchestrator-routed fallback for inter-worker comm is the ONE exception, because it has a semantic meaning (peer unreachable = orchestrator-aware).
@@ -340,6 +349,11 @@ If you see `[PROMPT-IMPROVER ACTIVE]` in any UserPromptSubmit hook context: NEVE
 3. Default response is `ja` (accept improved version)
 4. Only respond `fix: <correction>` if a specific tag is verifiably wrong
 5. NEVER respond `skip` unless user explicitly typed it themselves
+
+## tmo task ID
+T-<id>
+
+(Mandatory. Worker first action after this bundle: `tmo task claim T-<id> --by <self>`. Update status per phase via `tmo task update T-<id> status <state>`. End with `tmo task done T-<id> --output "<sha or summary>"`. NEVER finish without a `done` event.)
 
 ## Initial task
 <one-paragraph task derived from orchestrator plan>
