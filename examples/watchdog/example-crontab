@@ -1,0 +1,9 @@
+# tmo watchdog cron entry. Tick every 10 minutes.
+# Adjust the path to tmo and the session name to match your setup.
+#
+# Install:
+#   crontab -l 2>/dev/null > /tmp/cron.bak
+#   cat /tmp/cron.bak examples/watchdog/example-crontab | crontab -
+#
+# Logs are appended to /tmp/tmo-watchdog.log.
+*/10 * * * * /home/freek/.local/bin/tmo watchdog tick orchestrator >> /tmp/tmo-watchdog.log 2>&1
