@@ -1,0 +1,60 @@
+# Karpathy bench: T-23 cleanup mechanic
+# Run with:  ./bench/T-23-cleanup-orch.sh
+# Pass criteria: pass-rate >= 0.8 (>=4/5 cases pass)
+task: T-23
+role: sub-orch-builder
+feature: tmo cleanup <session>
+
+cases:
+  - id: typical
+    category: typical
+    desc: |
+      Spawn an ephemeral tmux session, add a task, claim it, mark done,
+      set verdict=approve, run `tmo cleanup`. Expect: session-meta JSON
+      persisted into task.desc; tmux session no longer exists.
+    expected:
+      exit_code: 0
+      tmux_session_alive: false
+      task_desc_contains: '"schema":"tmo.session-meta.v1"'
+      task_desc_contains_keys: [session, role, cwd, branch, last_sha, panes, closed_at]
+
+  - id: edge-case-no-session
+    category: edge-case
+    desc: |
+      Run `tmo cleanup` on a session name that does not exist in tmux
+      AND has no task ownership. Expect graceful no-op exit 0.
+    expected:
+      exit_code: 0
+      stderr_contains: "nothing to do"
+
+  - id: anti-pattern-not-done
+    category: anti-pattern
+    desc: |
+      Spawn a session, claim a task, but DO NOT mark done. Run cleanup.
+      Expect refusal (non-zero exit), no destructive action, message
+      about status='in_progress' needing 'completed'.
+    expected:
+      exit_code_nonzero: true
+      stderr_contains: "verdict='' (need 'approve')"
+      tmux_session_alive: true
+
+  - id: ambiguous-scope-multi-window
+    category: ambiguous-scope
+    desc: |
+      Spawn a tmux session, then add 2 extra windows with distinct cwds
+      (/tmp/a, /tmp/b). Run full cleanup pipeline. Expect: meta.panes
+      array length >= 3, with all three cwds captured.
+    expected:
+      exit_code: 0
+      tmux_session_alive: false
+      meta_panes_min: 3
+      meta_cwds_contain: ["/tmp/T-23-bench-a", "/tmp/T-23-bench-b"]
+
+  - id: cross-skill-task-list
+    category: cross-skill
+    desc: |
+      After cleanup, `tmo task list --status completed` still includes the
+      cleaned task; no data lost from the event-sourced jsonl log.
+    expected:
+      exit_code: 0
+      task_listed_completed: true

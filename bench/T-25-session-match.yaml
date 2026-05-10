@@ -1,0 +1,54 @@
+# Karpathy bench: T-25 smart match across closed sessions
+# Run with:  ./bench/T-25-session-match.sh
+# Pass criteria: pass-rate >= 0.8 (>=4/5 cases pass)
+task: T-25
+role: sub-orch-builder
+feature: tmo session match <prompt-text> [--top N]
+
+cases:
+  - id: typical
+    category: typical
+    desc: |
+      Three closed sessions with distinct roles (frontend-dev,
+      backend-builder, docs-writer). Query "frontend component bug"
+      should rank frontend-dev highest.
+    expected:
+      exit_code: 0
+      top1_role_contains: "frontend"
+
+  - id: edge-case-empty-pool
+    category: edge-case
+    desc: |
+      No closed-session metas in the task store. `tmo session match
+      anything` should exit 0 with empty output (no crash).
+    expected:
+      exit_code: 0
+      stdout_empty: true
+
+  - id: anti-pattern-noise-tokens
+    category: anti-pattern
+    desc: |
+      Prompt with only sub-3-char tokens ("a b c d") yields no usable
+      tokens; output must be empty (no false matches), exit 0.
+    expected:
+      exit_code: 0
+      stdout_empty: true
+
+  - id: ambiguous-scope-multi-equal
+    category: ambiguous-scope
+    desc: |
+      Two closed sessions share the same role ("backend-builder").
+      Query that hits the shared role should return both with score>=1
+      and not crash on tie-breaking.
+    expected:
+      exit_code: 0
+      result_count_min: 2
+
+  - id: cross-skill-top-N
+    category: cross-skill
+    desc: |
+      `--top 1` against a pool of 3 matching sessions returns exactly 1
+      result, sorted by score desc.
+    expected:
+      exit_code: 0
+      result_count_eq: 1
