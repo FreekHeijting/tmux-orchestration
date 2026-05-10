@@ -1,0 +1,22 @@
+# Personal/private artefacten — NOOIT in publieke repo
+PROMPTS.md
+SKILLS_LOG.md
+CLAUDE.local.md
+.claude/state/
+.claude/settings.local.json
+.claude/notifications/
+.claude/cache/
+.claude/logs/
+
+# Editor
+.vscode/*
+!.vscode/tasks.json
+!.vscode/tasks.json.template
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Runtime
+state/
+*.log

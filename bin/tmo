@@ -1,0 +1,439 @@
+#!/usr/bin/env bash
+# tmo - tmux-orchestrator CLI
+# F1 skeleton: init, spawn, list-roles, send, receive, wait-for, bootstrap
+set -euo pipefail
+
+readonly TMO_VERSION="0.1.0"
+readonly TMO_ROOT="${TMO_ROOT:-$PWD}"
+readonly STATE_DIR="${TMO_STATE_DIR:-$TMO_ROOT/state}"
+readonly MESSAGES_FILE="$STATE_DIR/messages.jsonl"
+readonly SESSIONS_FILE="$STATE_DIR/sessions.yaml"
+readonly ROLES_DIR="${TMO_ROLES_DIR:-$TMO_ROOT/roles}"
+
+die() {
+    printf 'tmo: error: %s\n' "$*" >&2
+    exit 1
+}
+
+require_cmd() {
+    local cmd="$1"
+    command -v "$cmd" >/dev/null 2>&1 \
+        || die "missing dependency: $cmd. Install it and retry."
+}
+
+require_deps() {
+    require_cmd tmux
+    require_cmd jq
+    require_cmd claude
+}
+
+require_state() {
+    [[ -d "$STATE_DIR" ]] \
+        || die "state dir not found at $STATE_DIR. Run: tmo init"
+    [[ -f "$MESSAGES_FILE" ]] \
+        || die "messages file missing: $MESSAGES_FILE. Run: tmo init"
+}
+
+iso_ts() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# ---------------------------------------------------------------------------
+# usage / dispatch
+# ---------------------------------------------------------------------------
+
+usage_root() {
+    cat <<'EOF'
+tmo - tmux-orchestrator CLI
+
+Usage:
+  tmo <subcommand> [args...]
+  tmo --help | -h
+  tmo --version | -v
+
+Subcommands:
+  init                  Initialize state dir (state/, messages.jsonl, sessions.yaml)
+  spawn <N> [--role R]  Spawn N tmux worker sessions running claude
+  list-roles            List role profiles defined under roles/
+  send <to> <type> <payload>
+                        Append message to inbox of <to>
+  receive [--for S]     Read messages addressed to session S (default: $TMO_SESSION)
+  wait-for <session> <event>
+                        Block until <session> emits <event>
+  bootstrap             End-to-end: init + spawn + roles + attach panes
+
+Run 'tmo <subcommand> --help' for per-subcommand details.
+
+Environment:
+  TMO_ROOT          Workspace root (default: cwd)
+  TMO_STATE_DIR     Override state dir location
+  TMO_ROLES_DIR     Override roles dir location
+  TMO_SESSION       Current session name (used by 'receive' default)
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+usage_init() {
+    cat <<'EOF'
+tmo init - initialize state directory
+
+Usage:
+  tmo init [--force]
+
+Creates:
+  state/
+  state/messages.jsonl   (empty append-only event log)
+  state/sessions.yaml    (sessions metadata)
+
+Idempotent: re-running does not truncate existing files.
+With --force: recreate state/ from scratch (DESTRUCTIVE).
+EOF
+}
+
+cmd_init() {
+    local force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) usage_init; return 0 ;;
+            --force)   force=1; shift ;;
+            *) die "init: unknown arg: $1" ;;
+        esac
+    done
+
+    if [[ "$force" == "1" && -d "$STATE_DIR" ]]; then
+        rm -rf -- "$STATE_DIR"
+    fi
+
+    mkdir -p -- "$STATE_DIR"
+
+    if [[ ! -f "$MESSAGES_FILE" ]]; then
+        : > "$MESSAGES_FILE"
+    fi
+
+    if [[ ! -f "$SESSIONS_FILE" ]]; then
+        cat > "$SESSIONS_FILE" <<'EOF'
+# tmo sessions metadata
+# Schema: sessions: [{name, role, status, started_at}]
+sessions: []
+EOF
+    fi
+
+    printf 'tmo: initialized state at %s\n' "$STATE_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# spawn
+# ---------------------------------------------------------------------------
+
+usage_spawn() {
+    cat <<'EOF'
+tmo spawn - spawn N tmux worker sessions
+
+Usage:
+  tmo spawn <N> [--role <role>] [--prefix <name>]
+
+Args:
+  N         Number of sessions to spawn (integer >= 1)
+
+Flags:
+  --role R     Assign role R to each spawned worker (default: worker)
+  --prefix P   Session name prefix (default: worker, yields worker-1..N)
+
+Behavior:
+  Fail-fast if any target session name already exists.
+  Each session runs 'claude' as initial process.
+  Updates state/sessions.yaml with metadata per session.
+EOF
+}
+
+cmd_spawn() {
+    local n=""
+    local role="worker"
+    local prefix="worker"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) usage_spawn; return 0 ;;
+            --role)    role="${2:?--role requires value}"; shift 2 ;;
+            --prefix)  prefix="${2:?--prefix requires value}"; shift 2 ;;
+            -*)        die "spawn: unknown flag: $1" ;;
+            *)
+                if [[ -z "$n" ]]; then
+                    n="$1"; shift
+                else
+                    die "spawn: unexpected arg: $1"
+                fi
+                ;;
+        esac
+    done
+
+    [[ -n "$n" ]] || die "spawn: missing N. See: tmo spawn --help"
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || die "spawn: N must be positive integer, got: $n"
+
+    require_deps
+    require_state
+
+    local i name
+    for ((i=1; i<=n; i++)); do
+        name="${prefix}-${i}"
+        if tmux has-session -t "$name" 2>/dev/null; then
+            die "spawn: session '$name' already exists. Kill it first: tmux kill-session -t $name"
+        fi
+    done
+
+    local started_at
+    started_at="$(iso_ts)"
+
+    for ((i=1; i<=n; i++)); do
+        name="${prefix}-${i}"
+        tmux new-session -d -s "$name" -c "$TMO_ROOT" \
+            "TMO_SESSION=$name TMO_ROLE=$role claude"
+        printf 'tmo: spawned %s (role=%s)\n' "$name" "$role"
+
+        # append to sessions.yaml as YAML list item
+        cat >> "$SESSIONS_FILE" <<EOF
+  - { name: "$name", role: "$role", status: "spawned", started_at: "$started_at" }
+EOF
+    done
+}
+
+# ---------------------------------------------------------------------------
+# list-roles
+# ---------------------------------------------------------------------------
+
+usage_list_roles() {
+    cat <<'EOF'
+tmo list-roles - list role profiles in roles/
+
+Usage:
+  tmo list-roles
+
+Reads YAML frontmatter (name + description) from roles/*.md.
+EOF
+}
+
+cmd_list_roles() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) usage_list_roles; return 0 ;;
+            *) die "list-roles: unknown arg: $1" ;;
+        esac
+    done
+
+    if [[ ! -d "$ROLES_DIR" ]]; then
+        printf 'tmo: no roles dir at %s\n' "$ROLES_DIR" >&2
+        return 0
+    fi
+
+    shopt -s nullglob
+    local files=("$ROLES_DIR"/*.md)
+    shopt -u nullglob
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        printf 'tmo: no roles defined in %s\n' "$ROLES_DIR"
+        return 0
+    fi
+
+    local f name desc in_fm
+    for f in "${files[@]}"; do
+        name=""
+        desc=""
+        in_fm=0
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == "---" ]]; then
+                in_fm=$((in_fm + 1))
+                [[ "$in_fm" -ge 2 ]] && break
+                continue
+            fi
+            [[ "$in_fm" == "1" ]] || continue
+            case "$line" in
+                name:*) name="${line#name:}"; name="${name# }" ;;
+                description:*) desc="${line#description:}"; desc="${desc# }" ;;
+            esac
+        done < "$f"
+        printf '%s\t%s\n' "${name:-$(basename "$f" .md)}" "${desc:-(no description)}"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# send
+# ---------------------------------------------------------------------------
+
+usage_send() {
+    cat <<'EOF'
+tmo send - append message to inbox
+
+Usage:
+  tmo send <to> <type> <payload-json>
+
+Args:
+  to            Target session name (or 'broadcast')
+  type          Message type (e.g. task, ping, done)
+  payload-json  Valid JSON object (e.g. '{"goal":"port X"}')
+
+Writes a JSON line to state/messages.jsonl with file-locked append.
+EOF
+}
+
+cmd_send() {
+    while [[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" ) ]]; do
+        usage_send; return 0
+    done
+
+    [[ $# -eq 3 ]] || die "send: requires <to> <type> <payload>. See: tmo send --help"
+
+    local to="$1" type="$2" payload="$3"
+    local from="${TMO_SESSION:-orchestrator}"
+
+    require_deps
+    require_state
+
+    # validate payload is JSON
+    printf '%s' "$payload" | jq -e . >/dev/null 2>&1 \
+        || die "send: payload is not valid JSON: $payload"
+
+    local msg
+    msg="$(jq -cn \
+        --arg from "$from" \
+        --arg to "$to" \
+        --arg type "$type" \
+        --argjson payload "$payload" \
+        --arg ts "$(iso_ts)" \
+        '{from:$from, to:$to, type:$type, payload:$payload, ts:$ts}')"
+
+    # locked append
+    (
+        flock -x 9
+        printf '%s\n' "$msg" >> "$MESSAGES_FILE"
+    ) 9>>"$MESSAGES_FILE.lock"
+
+    printf 'tmo: sent %s -> %s [%s]\n' "$from" "$to" "$type"
+}
+
+# ---------------------------------------------------------------------------
+# receive
+# ---------------------------------------------------------------------------
+
+usage_receive() {
+    cat <<'EOF'
+tmo receive - read messages from inbox
+
+Usage:
+  tmo receive [--for <session>] [--type <type>] [--since <iso-ts>]
+
+Flags:
+  --for S       Filter messages addressed to session S (default: $TMO_SESSION)
+  --type T      Filter by message type
+  --since TS    Only messages with ts >= TS
+
+Output: one JSON line per message.
+EOF
+}
+
+cmd_receive() {
+    local for_session="${TMO_SESSION:-}"
+    local type_filter=""
+    local since=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) usage_receive; return 0 ;;
+            --for)     for_session="${2:?--for requires value}"; shift 2 ;;
+            --type)    type_filter="${2:?--type requires value}"; shift 2 ;;
+            --since)   since="${2:?--since requires value}"; shift 2 ;;
+            *) die "receive: unknown arg: $1" ;;
+        esac
+    done
+
+    [[ -n "$for_session" ]] \
+        || die "receive: no target session. Set TMO_SESSION or use --for <name>"
+
+    require_deps
+    require_state
+
+    local jq_filter='select(.to == $sess or .to == "broadcast")'
+    [[ -n "$type_filter" ]] && jq_filter="$jq_filter | select(.type == \$type)"
+    [[ -n "$since" ]]       && jq_filter="$jq_filter | select(.ts >= \$since)"
+
+    jq -c \
+        --arg sess "$for_session" \
+        --arg type "$type_filter" \
+        --arg since "$since" \
+        "$jq_filter" \
+        "$MESSAGES_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# wait-for (F5 stub)
+# ---------------------------------------------------------------------------
+
+usage_wait_for() {
+    cat <<'EOF'
+tmo wait-for - block until a session emits an event (F5)
+
+Usage:
+  tmo wait-for <session> <event-type> [--interval <sec>] [--timeout <sec>]
+
+NOTE: F5 implementation pending. F1 skeleton stub.
+EOF
+}
+
+cmd_wait_for() {
+    while [[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" ) ]]; do
+        usage_wait_for; return 0
+    done
+    die "wait-for: not yet implemented (F5 phase). See: tmo wait-for --help"
+}
+
+# ---------------------------------------------------------------------------
+# bootstrap (F7 stub)
+# ---------------------------------------------------------------------------
+
+usage_bootstrap() {
+    cat <<'EOF'
+tmo bootstrap - end-to-end setup (F7)
+
+Usage:
+  tmo bootstrap --workspace <path> --roles r1,r2,r3 --sessions <N> [--vscode]
+
+NOTE: F7 implementation pending. F1 skeleton stub.
+EOF
+}
+
+cmd_bootstrap() {
+    while [[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" ) ]]; do
+        usage_bootstrap; return 0
+    done
+    die "bootstrap: not yet implemented (F7 phase). See: tmo bootstrap --help"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+main() {
+    if [[ $# -eq 0 ]]; then
+        usage_root
+        exit 0
+    fi
+
+    local sub="$1"; shift
+
+    case "$sub" in
+        --help|-h)        usage_root ;;
+        --version|-v)     printf 'tmo %s\n' "$TMO_VERSION" ;;
+        init)             cmd_init "$@" ;;
+        spawn)            cmd_spawn "$@" ;;
+        list-roles)       cmd_list_roles "$@" ;;
+        send)             cmd_send "$@" ;;
+        receive)          cmd_receive "$@" ;;
+        wait-for)         cmd_wait_for "$@" ;;
+        bootstrap)        cmd_bootstrap "$@" ;;
+        *) die "unknown subcommand: $sub. Run: tmo --help" ;;
+    esac
+}
+
+main "$@"

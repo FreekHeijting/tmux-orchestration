@@ -1,0 +1,87 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "tmo:orchestrator",
+      "detail": "Tmux session 'orchestrator' met claude (attach-or-create)",
+      "type": "shell",
+      "command": "tmux new-session -A -s orchestrator claude",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:builder-cli",
+      "detail": "Tmux session 'builder-cli' met claude",
+      "type": "shell",
+      "command": "tmux new-session -A -s builder-cli claude",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:builder-tui",
+      "detail": "Tmux session 'builder-tui' met claude",
+      "type": "shell",
+      "command": "tmux new-session -A -s builder-tui claude",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:tui-builder",
+      "detail": "Attach naar live tui-builder worker (rich-TUI mockup taak)",
+      "type": "shell",
+      "command": "tmux new-session -A -s tui-builder -c /home/freek/GitHub/tmux-orchestrator 'TMO_SESSION=tui-builder TMO_STATE_DIR=/home/freek/GitHub/tmux-orchestrator/state claude'",
+      "presentation": {
+        "echo": false,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false,
+        "close": false,
+        "group": "tmo"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "tmo:start-all",
+      "detail": "Start orchestrator + 2 workers in 3 terminal-splits",
+      "dependsOn": [
+        "tmo:orchestrator",
+        "tmo:builder-cli",
+        "tmo:builder-tui"
+      ],
+      "dependsOrder": "parallel",
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

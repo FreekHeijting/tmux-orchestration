@@ -1,0 +1,84 @@
+# Global .graphifyignore template — privacy + noise guard
+# Gebruik: kopieer/symlink naar repo root voor eerste /graphify .
+# Werkt als .gitignore — regels kunnen in repo eigen .graphifyignore overschreven worden
+
+# === Privacy (KRITIEK, nooit in graph) ===
+PROMPTS.md
+SKILLS_LOG.md
+CLAUDE.local.md
+.claude/state/
+.claude/settings.local.json
+.claude/plans/
+.env*
+credentials*
+*_token*
+*_secret*
+*api_key*
+*apikey*
+*password*
+.ssh/
+.aws/
+.gnupg/
+*.pem
+*.key
+id_rsa*
+
+# === Graphify self-exclusion (voorkom recursieve extractie) ===
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.gemini/
+.opencode/
+graphify-out/
+docs/translations/
+
+# === Build/deps (ruis, geen semantiek) ===
+node_modules/
+dist/
+build/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+target/
+.next/
+.nuxt/
+coverage/
+.coverage
+
+# === VCS / tooling ===
+.git/
+.svn/
+.hg/
+.idea/
+.vscode/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# === Generated/compiled ===
+*.generated.*
+*.min.js
+*.min.css
+*.bundle.js
+*.bundle.css
+*.map
+
+# === Large binaries (scan-output, video, audio) ===
+*.iso
+*.tar
+*.tar.gz
+*.zip
+*.rar
+*.7z
+scan_*.pdf
+*.mp4
+*.mov
+*.webm
+*.mp3
+*.wav
+# (let op: graphify ondersteunt video/audio via Whisper; weghalen als je die WEL wil graphen)

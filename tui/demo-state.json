@@ -1,0 +1,111 @@
+{
+  "sessions": {
+    "orchestrator": {
+      "role": "orchestrator",
+      "status": "working",
+      "started_at": "2026-05-10T13:30:00Z",
+      "last_activity": "2026-05-10T13:51:58Z",
+      "usages": 42,
+      "file_scope": ["plans/", "state/"],
+      "skill_hints": ["superpowers:dispatching-parallel-agents", "superpowers:writing-plans"],
+      "capture_tail": [
+        "[orchestrator] dispatched batch-2 to builder-cli, builder-roles, builder-tui",
+        "[orchestrator] awaiting status from 3 workers (timeout 240s)",
+        "[orchestrator] received status from tui-builder: phase=working"
+      ]
+    },
+    "builder-cli": {
+      "role": "bash-cli-builder",
+      "status": "done",
+      "started_at": "2026-05-10T13:35:12Z",
+      "last_activity": "2026-05-10T13:48:10Z",
+      "usages": 18,
+      "file_scope": ["bin/tmo"],
+      "skill_hints": ["karpathy-guidelines"],
+      "capture_tail": [
+        "[builder-cli] bin/tmo F1 skeleton committed",
+        "[builder-cli] tmo init / spawn / send / receive verified",
+        "[builder-cli] sending done to orchestrator"
+      ]
+    },
+    "builder-roles": {
+      "role": "markdown-author",
+      "status": "done",
+      "started_at": "2026-05-10T13:35:14Z",
+      "last_activity": "2026-05-10T13:46:02Z",
+      "usages": 9,
+      "file_scope": ["roles/"],
+      "skill_hints": ["superpowers:writing-skills"],
+      "capture_tail": [
+        "[builder-roles] wrote roles/orchestrator.md, roles/backend.md",
+        "[builder-roles] wrote roles/frontend.md, roles/reviewer.md",
+        "[builder-roles] all 4 role-md committed, sending done"
+      ]
+    },
+    "tui-builder": {
+      "role": "python-tui-builder",
+      "status": "working",
+      "started_at": "2026-05-10T13:50:30Z",
+      "last_activity": "2026-05-10T13:52:10Z",
+      "usages": 6,
+      "file_scope": ["tui/tui-rich.py", "tui/demo-state.json", "tui/README-tui.md"],
+      "skill_hints": ["frontend-design", "autonomous-ui-testing"],
+      "capture_tail": [
+        "[tui-builder] reading lib/state.py for message schema",
+        "[tui-builder] rich import OK, scaffolding layout",
+        "[tui-builder] writing demo-state.json"
+      ]
+    },
+    "reviewer": {
+      "role": "code-reviewer",
+      "status": "blocked",
+      "started_at": "2026-05-10T13:40:00Z",
+      "last_activity": "2026-05-10T13:50:00Z",
+      "usages": 3,
+      "file_scope": ["(read-only all)"],
+      "skill_hints": ["superpowers:requesting-code-review"],
+      "capture_tail": [
+        "[reviewer] waiting for builder-cli done event",
+        "[reviewer] blocked on F1 verify-condition",
+        "[reviewer] sent blocked to orchestrator"
+      ]
+    },
+    "scratch-1": {
+      "role": "generalist",
+      "status": "idle",
+      "started_at": "2026-05-10T13:30:00Z",
+      "last_activity": "2026-05-10T13:30:05Z",
+      "usages": 0,
+      "file_scope": ["(unassigned)"],
+      "skill_hints": [],
+      "capture_tail": ["[scratch-1] idle, awaiting dispatch"]
+    },
+    "scratch-2": {
+      "role": "generalist",
+      "status": "replaced",
+      "started_at": "2026-05-10T13:32:00Z",
+      "last_activity": "2026-05-10T13:44:00Z",
+      "usages": 2,
+      "file_scope": ["(retired)"],
+      "skill_hints": [],
+      "capture_tail": [
+        "[scratch-2] failed verify-condition twice",
+        "[scratch-2] replaced by orchestrator with builder-cli"
+      ]
+    }
+  },
+  "messages": [
+    {"from": "orchestrator", "to": "builder-cli",    "type": "task",        "payload": {"goal": "F1: implement bin/tmo skeleton", "deadline": "2026-05-10T14:00:00Z"}, "ts": "2026-05-10T13:35:00Z"},
+    {"from": "orchestrator", "to": "builder-roles",  "type": "task",        "payload": {"goal": "F2: write 4 role profile MDs"}, "ts": "2026-05-10T13:35:01Z"},
+    {"from": "orchestrator", "to": "builder-tui",    "type": "task",        "payload": {"goal": "F3: build curses TUI v0"}, "ts": "2026-05-10T13:35:02Z"},
+    {"from": "builder-cli",  "to": "orchestrator",   "type": "status",      "payload": {"phase": "working", "step": "scaffolding"}, "ts": "2026-05-10T13:38:14Z"},
+    {"from": "builder-roles","to": "orchestrator",   "type": "status",      "payload": {"phase": "working", "step": "drafting orchestrator.md"}, "ts": "2026-05-10T13:39:00Z"},
+    {"from": "reviewer",     "to": "orchestrator",   "type": "blocked",     "payload": {"need": "builder-cli done event before F1 review"}, "ts": "2026-05-10T13:42:11Z"},
+    {"from": "orchestrator", "to": "reviewer",       "type": "peer-prompt", "payload": {"hint": "poll wait-for builder-cli done"}, "ts": "2026-05-10T13:42:30Z"},
+    {"from": "builder-roles","to": "orchestrator",   "type": "done",        "payload": {"files": ["roles/orchestrator.md","roles/backend.md","roles/frontend.md","roles/reviewer.md"]}, "ts": "2026-05-10T13:46:02Z"},
+    {"from": "orchestrator", "to": "scratch-2",      "type": "replace",     "payload": {"reason": "verify-condition failed twice"}, "ts": "2026-05-10T13:44:00Z"},
+    {"from": "builder-cli",  "to": "orchestrator",   "type": "done",        "payload": {"files": ["bin/tmo"], "verify": "tmo init+spawn+send+receive smoke-tested"}, "ts": "2026-05-10T13:48:10Z"},
+    {"from": "orchestrator", "to": "tui-builder",    "type": "task",        "payload": {"goal": "build rich-based TUI dashboard mockup"}, "ts": "2026-05-10T13:50:30Z"},
+    {"from": "tui-builder",  "to": "orchestrator",   "type": "status",      "payload": {"phase": "working", "step": "scaffolding tui/tui-rich.py + demo-state.json"}, "ts": "2026-05-10T13:51:58Z"}
+  ]
+}
