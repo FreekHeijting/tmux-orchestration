@@ -193,11 +193,32 @@ Each edge case has been tested with two ephemeral tmux+claude sessions (`pc-test
 
 ### 5.3 Peer just exited claude (REPL gone)
 
-- Status: <pending F4>
+- Status: PROVEN DANGEROUS (F4)
 - Transcript: `tests/peer-comm/03-peer-exited.txt`
+- Repro: `bash tests/peer-comm/03-peer-exited.sh`
 - Expected: paste lands in bash, Enter executes the body as a shell command. DANGEROUS.
-- Observed: <to be filled in F4>
-- Mitigation: <to be filled in F4>
+- Observed:
+  - receiver pane was at bash prompt `freek@host:~/...$` after `/exit` (claude REPL gone)
+  - Channel A injection still succeeded mechanically: paste appeared on the bash command line, Enter submitted
+  - bash interpreted the payload: `Opdracht '[from' niet gevonden` (command not found error)
+  - benign in this test (payload had no shell-evaluable parts), but a payload starting with `rm`, `curl ... | sh`, redirections (`>file`), or any executable name would EXECUTE
+  - sender had no signal of failure beyond the absence of an audit-log peer-reply; orchestrator can detect via `tmux has-session` + capture-pane grep, but only AFTER the damage is done
+- Mitigation (mandatory, sender-side, BEFORE any Channel A injection):
+  1. `tmux has-session -t "$PEER" 2>/dev/null` must succeed
+  2. capture-pane and verify claude REPL state. Reliable signals in current claude CLI render: a horizontal separator line of `─` characters and a `❯` prompt indicator inside it. A bash prompt looks like `<user>@<host>:<cwd>$` with no separator.
+  3. If detection fails, fall back to Channel B (orchestrator forward) which performs its own pre-flight check and either retries when peer recovers or emits `forward-ack` with `status:"fail"`.
+- Sender pre-flight snippet:
+  ```bash
+  is_claude_repl() {
+    tmux capture-pane -t "$1:0.0" -p -S -5 | grep -qE '^─+$' \
+      && tmux capture-pane -t "$1:0.0" -p -S -5 | grep -qE '^❯ ?$'
+  }
+  if ! is_claude_repl "$PEER"; then
+    tmo send orchestrator forward "..."  # Channel B fallback
+    exit 0
+  fi
+  # ... proceed with Channel A
+  ```
 
 ### 5.4 Multiple peer-prompts in flight to same target within 1 second
 
