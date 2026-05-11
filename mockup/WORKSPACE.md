@@ -283,11 +283,14 @@ Channel C (audit, always-on):
 
 ## Cross-refs
 
-- `mockup/kanban-flow.md` — T-28 decompose/review/approve/board flow (next)
 - `mockup/_STANDARD.md` — flowchart quality rules (this dir)
+- `mockup/kanban-flow.md` — T-28 decompose/review/approve/board (LIVE)
+- `mockup/tui-statusbar.md` — T-43 documents live 4-line status-bar
+- `mockup/tui-sidekick.md` — T-42 design for T-20 split-pane sidekick
+- `mockup/tui-dashboard.md` — T-41 design for T-2 central live dashboard
 - `skills/tmux-orchestration/SKILL.md` — 8-phase flow + hard rules
 - `roles/sub-orch-builder.md` — sub-orch binding rules
-- `bench/skill-bench-self-v0.1.yaml` — founding bench
+- `bench/*.yaml` — Karpathy 5-task benches per feature
 
 ## Status
 
