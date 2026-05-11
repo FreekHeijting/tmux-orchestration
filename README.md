@@ -7,10 +7,16 @@ Designed for VS Code on Linux. Workers spawn as VS Code integrated terminal pane
 ## What you get
 
 - 8-phase mandatory flow before any spawn (context snapshot, mandatory questions, live-session check, role assignment, workspace assignment, skill-hint scan, communication channels, spawn + runbook)
-- Quality-gate loop after every worker reply: APPROVE / RE-INSTRUCT / REPLACE
+- Kanban task tracker (`tmo task`): pending → in_progress → review → completed with `decompose`, `review`, `approve`, `reject`, `board` subcommands. Sub-orchs MUST NOT call `done` directly; reserved for orchestrator after `approve`
+- Auto-task capture: every user prompt becomes a `tmo task` via `UserPromptSubmit` hook, with last 3 prompts prepended as context
+- Auto-claim on spawn: `SessionStart` hook auto-claims `TMO_TASK` if set in env
+- Karpathy 5-task bench harness (`skill-bench`): every new feature self-benches; >= 0.8 pass-rate to graduate
+- Mockup-first workflow: every new feature lands `mockup/<feature>.md` with flowchart BEFORE first impl commit
 - Three communication channels: direct peer-injection (user-visible), orchestrator-routed fallback, append-only audit-forum (`state/messages.jsonl`)
-- File-scope isolation per worker
+- File-scope isolation per worker; sub-orchs run in git worktrees
 - Cross-workspace workers share state via `TMO_STATE_DIR`
+- Per-session tmux 4-line status-bar: session, role, task-id, state, peer-traffic count, git branch, current dir, first sentence of task desc
+- Live session cleanup + reopen: `tmo cleanup` persists session-meta, `tmo session reopen <task-id>` re-spawns at original cwd
 - Prompt-improver enforcement: never skipped, default-accepted in workers
 
 ## Prerequisites
@@ -44,23 +50,43 @@ This repo is structured as a Claude Code **plugin**. Two install paths.
 /plugin install https://github.com/<your-username>/tmux-orchestration
 ```
 
-Claude Code registers the plugin, auto-discovers `skills/tmux-orchestration/SKILL.md`, and resolves `${CLAUDE_PLUGIN_ROOT}` to the install location so role-md paths work out of the box.
+Claude Code registers the plugin, auto-discovers `skills/tmux-orchestration/SKILL.md` and `skills/skill-bench/SKILL.md`, loads `hooks/hooks.json` (UserPromptSubmit + SessionStart), and resolves `${CLAUDE_PLUGIN_ROOT}` to the install location so role-md paths work out of the box.
 
-### Path B - Manual install (no plugin system)
+### Path B - Manual install via `install.sh` (idempotent)
 
 ```bash
 git clone https://github.com/<your-username>/tmux-orchestration.git ~/GitHub/tmux-orchestration
-
-# skill into global skills dir
-mkdir -p ~/.claude/skills/tmux-orchestration
-cp -r ~/GitHub/tmux-orchestration/skills/tmux-orchestration/* ~/.claude/skills/tmux-orchestration/
-
-# tmo CLI on PATH
-ln -sf ~/GitHub/tmux-orchestration/bin/tmo ~/.local/bin/tmo
-
-# manually export CLAUDE_PLUGIN_ROOT so SKILL.md role-paths resolve
-echo 'export CLAUDE_PLUGIN_ROOT=$HOME/GitHub/tmux-orchestration' >> ~/.bashrc
+cd ~/GitHub/tmux-orchestration
+./install.sh
 ```
+
+`install.sh` is idempotent. It does three things:
+
+1. Symlinks `bin/tmo` and `bin/skill-bench` into `~/.local/bin/` (overwrite on re-run).
+2. Copies `skills/tmux-orchestration/SKILL.md` + `references/` into `~/.claude/skills/tmux-orchestration/` (overwrite on re-run).
+3. Appends `export CLAUDE_PLUGIN_ROOT=<repo-path>` to `~/.bashrc` if not already there.
+
+Re-source `~/.bashrc` (or open a new shell) after first install. Verify:
+
+```bash
+tmo --version       # expect: tmo 0.3.0 or newer
+skill-bench --version
+ls ~/.claude/skills/tmux-orchestration/
+```
+
+In manual-install mode, hooks are NOT auto-wired into `~/.claude/settings.json`. Either install via Path A (plugin) which registers them, or copy the hook entries from `hooks/hooks.json` into your global `~/.claude/settings.json` manually.
+
+### Auto-reinstall workflow
+
+When you pull or merge changes into the repo, re-run `install.sh` once. Because it overwrites symlinks and skill files, this is the canonical way to pick up updates without restarting Claude Code:
+
+```bash
+cd ~/GitHub/tmux-orchestration
+git pull --ff-only
+./install.sh
+```
+
+Take the same step after each `git merge --no-ff feat/<branch>` you do locally. The `bin/tmo` symlink resolves through to the working tree, so changes to the CLI take effect immediately for new invocations.
 
 ### Per-workspace tasks template
 
@@ -69,7 +95,7 @@ cp ~/GitHub/tmux-orchestration/.vscode/tasks.json.template <workspace>/.vscode/t
 echo "!.vscode/tasks.json" >> <workspace>/.gitignore
 ```
 
-Verify install: in a new Claude Code session, `tmux-orchestration` shows in the available-skills list.
+Verify install: in a new Claude Code session, `tmux-orchestration` shows in the available-skills list and `tmo task board` runs without error.
 
 ## Role library
 
@@ -94,30 +120,51 @@ In any workspace where you want to orchestrate:
 
 ## Status
 
-v0.3.0 - skill core + audit-trail communication. Iterating per real-session test feedback.
+v0.7-ish - skill core + kanban tmo task + skill-bench + mockup-first + hooks + cleanup/reopen mechanic. Iterating per real-session test feedback.
 
-Essentials in this repo grow as testing reveals what is actually needed. Currently in repo (plugin format):
+Repo layout (plugin format):
 
 ```
 tmux-orchestration/
 ├── .claude-plugin/
 │   └── plugin.json           plugin manifest
-├── skills/tmux-orchestration/
-│   ├── SKILL.md              the skill
-│   └── references/           skill-internal reference
-├── roles/                    canonical role library (5 stable + runtime candidates)
-├── bin/tmo                   CLI binary
-├── tui/                      rich-based dashboard mockup (tui-rich.py + demo-state.json)
+├── .vscode/
+│   ├── tasks.json            live 4-attach-tab config (runOn: folderOpen)
+│   └── tasks.json.template   per-workspace template
+├── bin/
+│   ├── tmo                   main CLI (init/spawn/task/note/watchdog/etc)
+│   └── skill-bench           Karpathy 5-task bench harness
+├── hooks/
+│   ├── hooks.json            UserPromptSubmit + SessionStart wiring
+│   └── scripts/
+│       ├── auto-task-add.sh  every user prompt -> tmo task add
+│       └── sub-orch-claim.sh SessionStart auto-claim TMO_TASK
+├── skills/
+│   ├── tmux-orchestration/
+│   │   ├── SKILL.md          the orchestration skill
+│   │   └── references/       inter-claude-comm, role-evolution, watchdog
+│   └── skill-bench/
+│       └── SKILL.md          Karpathy methodology
+├── roles/                    5 stable + sub-orch-builder (candidate)
+├── mockup/                   design-first per feature
+│   ├── _STANDARD.md          flowchart quality rules
+│   ├── WORKSPACE.md          living workspace overview
+│   └── kanban-flow.md        T-28 design
+├── bench/                    Karpathy bench yamls per feature
+├── examples/                 runnable examples (perf, watchdog, cleanup)
+├── tests/                    e2e tests per feature
+├── tui/                      rich-based dashboard mockup
 ├── claude-md-blocks/         paste-able CLAUDE.md snippets for users
-├── .vscode/tasks.json.template   per-workspace auto-spawn template
+├── install.sh                idempotent installer (Path B)
 ├── README.md / CLAUDE.md / LICENSE / .gitignore
+└── state/                    gitignored, live runtime data
 ```
 
 Coming as testing dictates need:
 
-- `helpers/*` tmux-multi-inject / -capture / tmux-tree
 - `commands/` slash-commands (e.g. `/tmo-status`, `/tmo-spawn`)
-- `hooks/` event hooks
+- smart-compacter worker (5-min context-watchdog + agent-team begrip-pass + iterating compact-instructie writer)
+- per-agent split-pane sidekick TUI
 - `docs/TMO_CHEATSHEET.html` full visual cheatsheet
 - screenshots
 
