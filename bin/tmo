@@ -567,20 +567,32 @@ cmd_note() {
 
 usage_task() {
     cat <<'EOF'
-tmo task - cross-session task tracker
+tmo task - kanban-style cross-session task tracker
 
 Usage:
   tmo task add <subject> [--desc <text>] [--by <handle>]
-  tmo task list [--status pending|in_progress|completed] [--owner <name>]
+                         [--context <text>] [--parent <id>]
+  tmo task list [--status pending|in_progress|review|completed] [--owner <name>]
   tmo task get <id>
   tmo task claim <id> [--by <name>]
-  tmo task update <id> <field> <value>     # subject|desc|status
+  tmo task update <id> <field> <value>     # arbitrary metadata field
+  tmo task decompose <parent-id> <sub1> <sub2> ...
+                         [--context <text>] [--by <name>]
+  tmo task review <id> --evidence <text> [--by <name>]
+  tmo task approve <id> [--by <name>]
+  tmo task reject <id> --reason <text> [--by <name>]
   tmo task done <id> [--output <text>]
+  tmo task board [--include-completed]
+
+Statuses: pending → in_progress → review → completed
+Sub-orchs MUST NOT call 'done' directly; reserved for orchestrator after
+approve. Sub-orchs call 'review' with evidence; orchestrator gates via
+approve/reject. Reject loops the task back to in_progress.
 
 Storage: state/tasks.jsonl (append-only events). State derived by replay:
-last event per id wins for status/owner; subject/desc updatable.
+last event per id wins for status/owner; arbitrary fields updatable.
 
-Events: add | claim | update | done
+Events: add | claim | update | decompose | review | approve | reject | done
 
 ID format: T-<n> where n is count of add-events + 1.
 EOF
@@ -593,11 +605,22 @@ _tasks_replay() {
             if $e.event == "add" then
                 .[$e.id] = {id:$e.id, subject:$e.subject, desc:($e.desc // ""),
                             status:"pending", owner:null, created:$e.ts, updated:$e.ts,
-                            output:null, by:($e.by // "unknown")}
+                            output:null, by:($e.by // "unknown"),
+                            parent:($e.parent // null), context:($e.context // ""),
+                            evidence:null, gate:null, reject_reason:null,
+                            children:[]}
             elif $e.event == "claim" then
                 .[$e.id].owner = $e.owner | .[$e.id].status = "in_progress" | .[$e.id].updated = $e.ts
             elif $e.event == "update" then
                 .[$e.id][$e.field] = $e.value | .[$e.id].updated = $e.ts
+            elif $e.event == "decompose" then
+                .[$e.id].children = ($e.children // []) | .[$e.id].updated = $e.ts
+            elif $e.event == "review" then
+                .[$e.id].status = "review" | .[$e.id].evidence = ($e.evidence // "") | .[$e.id].updated = $e.ts
+            elif $e.event == "approve" then
+                .[$e.id].gate = "approve" | .[$e.id].updated = $e.ts
+            elif $e.event == "reject" then
+                .[$e.id].status = "in_progress" | .[$e.id].gate = "reject" | .[$e.id].reject_reason = ($e.reason // "") | .[$e.id].updated = $e.ts
             elif $e.event == "done" then
                 .[$e.id].status = "completed" | .[$e.id].output = ($e.output // "") | .[$e.id].updated = $e.ts
             else . end)
@@ -623,22 +646,156 @@ cmd_task() {
         --help|-h) usage_task; return 0 ;;
 
         add)
-            local subject="" desc="" by="${TMO_SESSION:-unknown}"
+            local subject="" desc="" by="${TMO_SESSION:-unknown}" context="" parent=""
             [[ $# -gt 0 ]] || die "task add: subject required"
             subject="$1"; shift
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --desc) desc="$2"; shift 2 ;;
-                    --by)   by="$2";   shift 2 ;;
+                    --desc)    desc="$2";    shift 2 ;;
+                    --by)      by="$2";      shift 2 ;;
+                    --context) context="$2"; shift 2 ;;
+                    --parent)  parent="$2";  shift 2 ;;
                     *) die "task add: unknown flag: $1" ;;
                 esac
             done
             local id; id=$(_next_task_id)
-            jq -nc --arg id "$id" --arg s "$subject" --arg d "$desc" \
-                   --arg by "$by" --arg ts "$(iso_ts)" \
-                '{event:"add", id:$id, subject:$s, desc:$d, by:$by, ts:$ts}' \
-                >> "$TASKS_FILE"
+            if [[ -n "$parent" ]]; then
+                jq -nc --arg id "$id" --arg s "$subject" --arg d "$desc" \
+                       --arg by "$by" --arg ts "$(iso_ts)" \
+                       --arg ctx "$context" --arg p "$parent" \
+                    '{event:"add", id:$id, subject:$s, desc:$d, by:$by, ts:$ts, context:$ctx, parent:$p}' \
+                    >> "$TASKS_FILE"
+            else
+                jq -nc --arg id "$id" --arg s "$subject" --arg d "$desc" \
+                       --arg by "$by" --arg ts "$(iso_ts)" --arg ctx "$context" \
+                    '{event:"add", id:$id, subject:$s, desc:$d, by:$by, ts:$ts, context:$ctx}' \
+                    >> "$TASKS_FILE"
+            fi
             printf 'tmo: task added %s\n' "$id"
+            ;;
+
+        decompose)
+            [[ $# -ge 2 ]] || die "task decompose: parent-id + at least one subject required"
+            local parent_id="$1"; shift
+            local context="" by="${TMO_SESSION:-unknown}"
+            local subjects=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --context) context="$2"; shift 2 ;;
+                    --by)      by="$2";      shift 2 ;;
+                    --*)       die "task decompose: unknown flag: $1" ;;
+                    *)         subjects+=("$1"); shift ;;
+                esac
+            done
+            [[ ${#subjects[@]} -ge 1 ]] || die "task decompose: at least one subject required"
+            # validate parent exists
+            grep -qE "\"event\":\"add\"[^}]*\"id\":\"$parent_id\"" "$TASKS_FILE" 2>/dev/null \
+                || die "task decompose: parent $parent_id has no add-event in tasks.jsonl"
+
+            local child_ids=()
+            local ts; ts=$(iso_ts)
+            local s child_id
+            for s in "${subjects[@]}"; do
+                child_id=$(_next_task_id)
+                jq -nc --arg id "$child_id" --arg s "$s" --arg d "" \
+                       --arg by "$by" --arg ts "$ts" \
+                       --arg ctx "$context" --arg p "$parent_id" \
+                    '{event:"add", id:$id, subject:$s, desc:$d, by:$by, ts:$ts, context:$ctx, parent:$p}' \
+                    >> "$TASKS_FILE"
+                child_ids+=("$child_id")
+            done
+            # audit event recording the decomposition
+            local children_json
+            children_json=$(printf '%s\n' "${child_ids[@]}" | jq -R . | jq -s .)
+            jq -nc --arg id "$parent_id" --arg by "$by" --arg ts "$ts" \
+                   --argjson children "$children_json" \
+                '{event:"decompose", id:$id, by:$by, ts:$ts, children:$children}' \
+                >> "$TASKS_FILE"
+            # auto-close parent with output describing children
+            local output_str
+            output_str="decomposed → $(IFS=, ; echo "${child_ids[*]}")"
+            jq -nc --arg id "$parent_id" --arg out "$output_str" --arg ts "$ts" \
+                '{event:"done", id:$id, output:$out, ts:$ts}' >> "$TASKS_FILE"
+            printf 'tmo: task %s decomposed into %s\n' "$parent_id" "${child_ids[*]}"
+            ;;
+
+        review)
+            [[ $# -gt 0 ]] || die "task review: id required"
+            local id="$1"; shift
+            local evidence="" by="${TMO_SESSION:-unknown}"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --evidence) evidence="$2"; shift 2 ;;
+                    --by)       by="$2";       shift 2 ;;
+                    *) die "task review: unknown flag: $1" ;;
+                esac
+            done
+            [[ -n "$evidence" ]] || die "task review: --evidence is required (sha, bench-rate, capture-pane url)"
+            jq -nc --arg id "$id" --arg ev "$evidence" --arg by "$by" --arg ts "$(iso_ts)" \
+                '{event:"review", id:$id, evidence:$ev, by:$by, ts:$ts}' >> "$TASKS_FILE"
+            printf 'tmo: task %s moved to review by %s\n' "$id" "$by"
+            ;;
+
+        approve)
+            [[ $# -gt 0 ]] || die "task approve: id required"
+            local id="$1"; shift
+            local by="${TMO_SESSION:-unknown}"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --by) by="$2"; shift 2 ;;
+                    *) die "task approve: unknown flag: $1" ;;
+                esac
+            done
+            jq -nc --arg id "$id" --arg by "$by" --arg ts "$(iso_ts)" \
+                '{event:"approve", id:$id, by:$by, ts:$ts}' >> "$TASKS_FILE"
+            printf 'tmo: task %s approved by %s. Run: tmo task done %s --output "<merge-sha>"\n' "$id" "$by" "$id"
+            ;;
+
+        reject)
+            [[ $# -gt 0 ]] || die "task reject: id required"
+            local id="$1"; shift
+            local reason="" by="${TMO_SESSION:-unknown}"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --reason) reason="$2"; shift 2 ;;
+                    --by)     by="$2";     shift 2 ;;
+                    *) die "task reject: unknown flag: $1" ;;
+                esac
+            done
+            [[ -n "$reason" ]] || die "task reject: --reason is required"
+            jq -nc --arg id "$id" --arg r "$reason" --arg by "$by" --arg ts "$(iso_ts)" \
+                '{event:"reject", id:$id, reason:$r, by:$by, ts:$ts}' >> "$TASKS_FILE"
+            printf 'tmo: task %s rejected by %s. Re-instruct sub-orch via tmo note.\n' "$id" "$by"
+            ;;
+
+        board)
+            local include_completed=0
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --include-completed) include_completed=1; shift ;;
+                    *) die "task board: unknown flag: $1" ;;
+                esac
+            done
+            _tasks_replay | jq -r --argjson inc "$include_completed" '
+                def col(status): map(select(.status == status)) | map("\(.id) \(.owner // "-")  \(.subject[:34])");
+                def pad(s; n): (s + (" " * n))[:n];
+                ({ pending:     (. | col("pending"))
+                 , in_progress: (. | col("in_progress"))
+                 , review:      (. | col("review"))
+                 , completed:   (if $inc == 1 then (. | col("completed")) else [] end)
+                 }) as $cols
+                | ([$cols.pending|length, $cols.in_progress|length, $cols.review|length, $cols.completed|length] | max) as $h
+                | "┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────────────────────────┬──────────────────────────────────────┐",
+                  ("│ " + pad("PENDING (\($cols.pending|length))"; 36) + " │ " + pad("IN_PROGRESS (\($cols.in_progress|length))"; 36) + " │ " + pad("REVIEW (\($cols.review|length))"; 36) + " │ " + pad("COMPLETED (\($cols.completed|length))"; 36) + " │"),
+                  "├──────────────────────────────────────┼──────────────────────────────────────┼──────────────────────────────────────┼──────────────────────────────────────┤",
+                  (range(0; $h) as $i
+                   | "│ " + pad(($cols.pending[$i] // ""); 36)
+                   + " │ " + pad(($cols.in_progress[$i] // ""); 36)
+                   + " │ " + pad(($cols.review[$i] // ""); 36)
+                   + " │ " + pad(($cols.completed[$i] // ""); 36)
+                   + " │"),
+                  "└──────────────────────────────────────┴──────────────────────────────────────┴──────────────────────────────────────┴──────────────────────────────────────┘"
+            '
             ;;
 
         list)

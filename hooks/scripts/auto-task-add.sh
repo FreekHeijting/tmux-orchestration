@@ -60,6 +60,24 @@ cwd_p="${PWD:-unknown}"
 tmux_sess="$(tmux display-message -p -F '#S' 2>/dev/null || echo "none")"
 desc="session=${sess_id} cwd=${cwd_p} tmux=${tmux_sess} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-TMO_STATE_DIR="$STATE_DIR" tmo task add "$subject" --desc "$desc" --by user-prompt-submit-hook >/dev/null 2>&1 || true
+# capture last 3 user-prompt tasks as "recent context" so the new task sees
+# the conversational background. Limit ~500 chars total.
+ctx=""
+TASKS_F="$STATE_DIR/tasks.jsonl"
+if [[ -f "$TASKS_F" ]]; then
+    recent=$(jq -r 'select(.event == "add" and (.by // "") == "user-prompt-submit-hook")
+                   | "\(.id) \(.subject)"' "$TASKS_F" 2>/dev/null | tail -3)
+    if [[ -n "$recent" ]]; then
+        # collapse newlines + truncate
+        ctx_raw=$(printf '%s' "$recent" | tr '\n' '|' | sed 's/|$//')
+        ctx="${ctx_raw:0:500}"
+    fi
+fi
+
+if [[ -n "$ctx" ]]; then
+    TMO_STATE_DIR="$STATE_DIR" tmo task add "$subject" --desc "$desc" --by user-prompt-submit-hook --context "recent prompts: $ctx" >/dev/null 2>&1 || true
+else
+    TMO_STATE_DIR="$STATE_DIR" tmo task add "$subject" --desc "$desc" --by user-prompt-submit-hook >/dev/null 2>&1 || true
+fi
 
 exit 0
