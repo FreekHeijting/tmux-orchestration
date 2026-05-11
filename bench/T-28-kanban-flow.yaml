@@ -1,0 +1,46 @@
+# Karpathy autoresearch 5-task benchmark for tmo task kanban-flow
+target: "bin/tmo cmd_task decompose/review/approve/reject/board"
+created: "2026-05-11T12:00:00Z"
+methodology: karpathy-autoresearch-5task
+graduate-threshold: 0.8
+
+cases:
+  - id: 1
+    category: typical
+    description: "tmo task decompose T-1 'do A' 'do B' 'do C' creates 3 children + auto-dones T-1"
+    expected: "T-1 status=completed with output='decomposed → T-2,T-3,T-4'; T-2/T-3/T-4 each status=pending with correct subjects"
+    actual: "ran in hermetic /tmp/kanban-bench. T-1 status=completed, output='decomposed → T-2,T-3,T-4', children=[T-2,T-3,T-4]. tmo task list shows T-2/T-3/T-4 pending with subjects do A / do B / do C."
+    verdict: PASS
+    notes: "evidence: jq output of T-1 + tmo task list grep. children-field in replay populated from decompose event."
+
+  - id: 2
+    category: edge-case
+    description: "tmo task decompose with exactly 1 subject (degenerate but valid)"
+    expected: "single child created, parent auto-completed, no warning emitted"
+    actual: "T-5 decomposed → T-6. parent status=completed, output='decomposed → T-6'. exit 0."
+    verdict: PASS
+    notes: "single-subject decompose works as designed. Useful for renaming/recapturing intent."
+
+  - id: 3
+    category: anti-pattern
+    description: "tmo task decompose with 0 subjects (only parent-id given) must refuse + write no events"
+    expected: "stderr error 'at least one subject required', exit non-zero, tasks.jsonl line-count unchanged"
+    actual: "stderr: 'tmo: error: task decompose: parent-id + at least one subject required'. exit 1. delta=0."
+    verdict: PASS
+    notes: "guard at top of decompose: '[[ \\$# -ge 2 ]] || die ...' refuses before any state mutation."
+
+  - id: 4
+    category: ambiguous-scope
+    description: "tmo task decompose with parent-id that does not exist in tasks.jsonl"
+    expected: "stderr error 'no add-event for parent', exit non-zero, no events written"
+    actual: "tried T-999. stderr: 'tmo: error: task decompose: parent T-999 has no add-event in tasks.jsonl'. delta=0."
+    verdict: PASS
+    notes: "pre-flight grep for add-event before any child creation. Same pattern as sub-orch-claim hook."
+
+  - id: 5
+    category: cross-skill
+    description: "after decompose events land in tasks.jsonl, tmo task list + tmo task get still work"
+    expected: "list shows parent as completed + children as pending. get returns full replay with new fields populated."
+    actual: "tmo task list shows T-1 completed + T-2/T-3/T-4 pending. tmo task get T-1 returns object with status=completed, children=[T-2,T-3,T-4]. Replay survives new event types."
+    verdict: PASS
+    notes: "_tasks_replay handles decompose / review / approve / reject branches without breaking add / claim / update / done. Backward-compatible."
