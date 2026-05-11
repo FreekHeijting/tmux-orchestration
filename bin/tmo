@@ -776,10 +776,23 @@ cmd_context_compact() {
     local resume="${2:-}"
     [[ -n "$session" ]] || die "context-compact: session name required"
 
-    # Inject /compact and wait for prompt to return
-    tmux send-keys -t "${session}:0.0" '/compact'
+    # /compact <resume> as ONE command — resume is the compact instruction,
+    # telling Claude what to preserve in the summary. Not a separate message.
+    local buf="ctx-compact-${session}"
+    local tmpfile="/tmp/tmo-compact-${session}.txt"
+    if [[ -n "$resume" ]]; then
+        printf '/compact %s' "$resume" > "$tmpfile"
+    else
+        printf '/compact' > "$tmpfile"
+    fi
+    tmux load-buffer -b "$buf" "$tmpfile"
+    tmux paste-buffer -b "$buf" -t "${session}:0.0"
     sleep 0.2
     tmux send-keys -t "${session}:0.0" Enter
+    tmux delete-buffer -b "$buf"
+    rm -f "$tmpfile"
+
+    # Wait for compact to finish (prompt returns)
     local i
     for i in $(seq 1 30); do
         sleep 2
@@ -787,19 +800,7 @@ cmd_context_compact() {
             | grep -qE '^[[:space:]]*❯|^> $' && break
     done
 
-    # Inject resume instruction via load-buffer (handles quotes/newlines)
-    if [[ -n "$resume" ]]; then
-        local buf="ctx-resume-${session}"
-        printf '%s' "$resume" > "/tmp/tmo-resume-${session}.txt"
-        tmux load-buffer -b "$buf" "/tmp/tmo-resume-${session}.txt"
-        tmux paste-buffer -b "$buf" -t "${session}:0.0"
-        sleep 0.2
-        tmux send-keys -t "${session}:0.0" Enter
-        tmux delete-buffer -b "$buf"
-        rm -f "/tmp/tmo-resume-${session}.txt"
-    fi
-
-    printf '[context-compact] session=%s compacted + resume injected\n' "$session" >&2
+    printf '[context-compact] session=%s /compact injected with resume\n' "$session" >&2
 }
 
 # ---------------------------------------------------------------------------
