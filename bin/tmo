@@ -600,6 +600,9 @@ EOF
 
 _tasks_replay() {
     [[ -f "$TASKS_FILE" ]] || { printf '[]\n'; return; }
+    # Hardened: only 'add' events create an entry. All other events for an
+    # unknown id are silently ignored (prevents phantom rows from claim/done
+    # events landing without preceding add).
     jq -s '
         reduce .[] as $e ({};
             if $e.event == "add" then
@@ -609,6 +612,8 @@ _tasks_replay() {
                             parent:($e.parent // null), context:($e.context // ""),
                             evidence:null, gate:null, reject_reason:null,
                             children:[]}
+            elif (.[$e.id] // null) == null then
+                .   # ignore events for unknown ids (no preceding add)
             elif $e.event == "claim" then
                 .[$e.id].owner = $e.owner | .[$e.id].status = "in_progress" | .[$e.id].updated = $e.ts
             elif $e.event == "update" then

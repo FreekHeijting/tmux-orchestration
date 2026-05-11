@@ -1,0 +1,46 @@
+# Karpathy autoresearch 5-task bench for _tasks_replay hardening
+target: "bin/tmo _tasks_replay (reject events for ids without preceding add)"
+created: "2026-05-11T19:45:00Z"
+methodology: karpathy-autoresearch-5task
+graduate-threshold: 0.8
+
+cases:
+  - id: 1
+    category: typical
+    description: "normal lifecycle add+claim+done on real task still works after hardening"
+    expected: "T-1 status=completed after done event"
+    actual: "ran in /tmp/harden-bench. tmo task get T-1 returns status=completed. Lifecycle unchanged."
+    verdict: PASS
+    notes: "hardening adds an else-branch guard but does not change happy-path semantics."
+
+  - id: 2
+    category: edge-case
+    description: "synthetic claim event for unknown id T-99 (no add) appended to tasks.jsonl"
+    expected: "replay ignores the claim, no phantom row in tmo task list"
+    actual: "appended raw claim event for T-99. tmo task list shows 0 rows matching ^T-99 or ^null."
+    verdict: PASS
+    notes: "guard '(.[$e.id] // null) == null' short-circuits before claim-branch fires."
+
+  - id: 3
+    category: anti-pattern
+    description: "synthetic done event for unknown id T-77 (no add) appended"
+    expected: "replay ignores the done, no phantom completed row"
+    actual: "appended raw done event for T-77. tmo task list shows 0 rows matching ^T-77."
+    verdict: PASS
+    notes: "same guard applies to all non-add events. Defense-in-depth complement to sub-orch-claim hook pre-flight check."
+
+  - id: 4
+    category: ambiguous-scope
+    description: "after junk events in jsonl, a real add+lifecycle still works for the next legitimate task"
+    expected: "tmo task add 'still works' creates T-2, status=pending, get returns proper record"
+    actual: "T-2 created. tmo task get T-2 returns status=pending. _next_task_id counted add-events correctly (junk events don't bump the id counter since grep matches event:add)."
+    verdict: PASS
+    notes: "backward-compatible with junk-containing jsonl. _next_task_id formula counts add-events, naturally robust."
+
+  - id: 5
+    category: cross-skill
+    description: "tmo task board (decompose-flow feature) still renders after hardening change"
+    expected: "board output: 4 columns with correct counts, no jq crash"
+    actual: "tmo task board prints PENDING (1) / IN_PROGRESS (0) / REVIEW (0) / COMPLETED (0). No errors."
+    verdict: PASS
+    notes: "hardening preserves replay semantics for legitimate events. board column-counts come from same replay output."
