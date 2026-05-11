@@ -68,6 +68,9 @@ Subcommands:
   task <action> ...     Cross-session task tracker (add/list/get/claim/update/done)
   watchdog <action> ... Cron-driven idle/awaiting-user state-machine
                         (tick/status/enable/disable)
+  context-check <s>     Check Claude context % in session pane (exit 0=OK, 1=HIGH, 2=unknown)
+  context-compact <s> [resume]
+                        /compact session, then inject optional resume instruction
   statusline <session>  Print one-line metadata for tmux status-bar
                         (called by tmux status-format on every refresh)
   cleanup <session>     Persist session-meta into completed task, kill tmux
@@ -703,6 +706,100 @@ cmd_task() {
 
         *) die "task: unknown action: $sub. Run: tmo task --help" ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# context-check — detect Claude context usage % from tmux pane
+# Reads "X% until auto-compact" indicator from Claude TUI statusline.
+# Exit 0  = context < 80% used (safe to inject directly)
+# Exit 1  = context >= 80% used (orchestrator must /compact + resume first)
+# Exit 2  = indicator not found (treated as safe, unknown Claude version)
+# ---------------------------------------------------------------------------
+
+usage_context_check() {
+    cat <<'EOF'
+tmo context-check - check Claude context usage in a tmux pane
+
+Usage:
+  tmo context-check <session>
+
+Reads "X% until auto-compact" from the Claude TUI statusline.
+
+Exit codes:
+  0  context < 80% used  (inject normally)
+  1  context >= 80% used (send /compact + resume instruction first)
+  2  indicator not found (safe default)
+
+Dispatch guard pattern:
+  if tmo context-check builder; then
+    tmo note builder "next task: ..."
+  else
+    tmo context-compact builder "$(cat /tmp/resume.txt)"
+  fi
+EOF
+}
+
+cmd_context_check() {
+    local session="${1:-}"
+    [[ -n "$session" ]] || die "context-check: session name required"
+
+    local pane_text
+    pane_text=$(tmux capture-pane -t "${session}:0.0" -p -S -5 2>/dev/null \
+        | sed 's/\x1b\[[0-9;]*[mABCDHJKST]//g; s/\x1b\[[0-9;]*[a-zA-Z]//g')
+
+    local remaining
+    remaining=$(printf '%s' "$pane_text" \
+        | grep -oE '[0-9]+% until auto-compact' \
+        | grep -oE '^[0-9]+' \
+        | tail -1)
+
+    if [[ -z "$remaining" ]]; then
+        printf '[context-check] session=%s indicator=not_found (assume OK)\n' "$session" >&2
+        return 2
+    fi
+
+    local used=$(( 100 - remaining ))
+    printf '[context-check] session=%s remaining=%s%% used=%s%%\n' \
+        "$session" "$remaining" "$used" >&2
+
+    if (( remaining <= 20 )); then
+        printf 'HIGH_CONTEXT: %s%% used — run /compact before injecting\n' "$used"
+        return 1
+    else
+        printf 'OK: %s%% used\n' "$used"
+        return 0
+    fi
+}
+
+cmd_context_compact() {
+    local session="${1:-}"
+    local resume="${2:-}"
+    [[ -n "$session" ]] || die "context-compact: session name required"
+
+    # Inject /compact and wait for prompt to return
+    tmux send-keys -t "${session}:0.0" '/compact'
+    sleep 0.2
+    tmux send-keys -t "${session}:0.0" Enter
+    local i
+    for i in $(seq 1 30); do
+        sleep 2
+        tmux capture-pane -t "${session}:0.0" -p -S -3 2>/dev/null \
+            | grep -qE '^[[:space:]]*❯|^> $' && break
+    done
+
+    # Inject resume instruction via load-buffer (handles quotes/newlines)
+    if [[ -n "$resume" ]]; then
+        local buf="ctx-resume-${session}"
+        printf '%s' "$resume" > "/tmp/tmo-resume-${session}.txt"
+        tmux load-buffer -b "$buf" "/tmp/tmo-resume-${session}.txt"
+        tmux paste-buffer -b "$buf" -t "${session}:0.0"
+        sleep 0.2
+        tmux send-keys -t "${session}:0.0" Enter
+        tmux delete-buffer -b "$buf"
+        rm -f "/tmp/tmo-resume-${session}.txt"
+    fi
+
+    printf '[context-compact] session=%s compacted + resume injected\n' "$session" >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -1720,6 +1817,8 @@ main() {
         note)             cmd_note "$@" ;;
         task)             cmd_task "$@" ;;
         watchdog)         cmd_watchdog "$@" ;;
+        context-check)    cmd_context_check "$@" ;;
+        context-compact)  cmd_context_compact "$@" ;;
         statusline)       cmd_statusline "$@" ;;
         headerline)       cmd_headerline "$@" ;;
         cleanup)          cmd_cleanup "$@" ;;
