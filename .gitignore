@@ -19,4 +19,5 @@ CLAUDE.local.md
 
 # Runtime
 state/
+state
 *.log
