@@ -1,6 +1,6 @@
 {
   "name": "tmux-orchestration",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Persistent tmux multi-Claude orchestrator. Current session becomes orchestrator, drives N parallel worker-Claude tmux sessions with assigned roles, file-scope, skill-hints, and quality-gate supervision. VS Code panel-aware. Role library grows organically via candidate -> stable graduation flow with Karpathy autoresearch benchmark.",
   "author": {
     "name": "Freek Heijting",
