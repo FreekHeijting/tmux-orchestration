@@ -3,9 +3,29 @@
 # F1 skeleton: init, spawn, list-roles, send, receive, wait-for, bootstrap
 set -euo pipefail
 
-readonly TMO_VERSION="0.3.0"
+readonly TMO_VERSION="0.3.1"
 readonly TMO_ROOT="${TMO_ROOT:-$PWD}"
-readonly STATE_DIR="${TMO_STATE_DIR:-$TMO_ROOT/state}"
+
+# Resolve the workspace state dir, portable across machines and users.
+# Order: explicit TMO_STATE_DIR override, else the nearest ancestor directory
+# that contains a .claude/ dir (the workspace root) yields <root>/.claude/state,
+# else fall back to TMO_ROOT/state. No hardcoded usernames, no env dependency.
+_tmo_resolve_state_dir() {
+    if [[ -n "${TMO_STATE_DIR:-}" ]]; then
+        printf '%s\n' "$TMO_STATE_DIR"
+        return 0
+    fi
+    local dir="$PWD"
+    while [[ "$dir" != "/" && -n "$dir" ]]; do
+        if [[ -d "$dir/.claude" ]]; then
+            printf '%s\n' "$dir/.claude/state"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    printf '%s\n' "$TMO_ROOT/state"
+}
+readonly STATE_DIR="$(_tmo_resolve_state_dir)"
 readonly MESSAGES_FILE="$STATE_DIR/messages.jsonl"
 readonly SESSIONS_FILE="$STATE_DIR/sessions.yaml"
 readonly TASKS_FILE="$STATE_DIR/tasks.jsonl"
