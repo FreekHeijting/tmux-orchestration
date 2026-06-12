@@ -14,13 +14,16 @@
 # - Failure-modes are silent on the user side: if tmo is missing or state-dir
 #   absent, the hook exits 0 without blocking the prompt.
 #
-# Required: jq, tmo on PATH, TMO_STATE_DIR pointing at a workspace with state/
-# already initialized (run `tmo init` once per orchestrator workspace).
+# Required: jq, tmo on PATH. State dir is resolved automatically (TMO_STATE_DIR
+# override, else the nearest ancestor with a .claude/ dir). Run `tmo init` once.
 
 set -euo pipefail
 
 command -v jq  >/dev/null 2>&1 || exit 0
 command -v tmo >/dev/null 2>&1 || exit 0
+
+# shellcheck source=_resolve-state-dir.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_resolve-state-dir.sh"
 
 input=$(cat)
 prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)
@@ -49,8 +52,8 @@ esac
 subject="${trimmed:0:200}"
 [[ ${#trimmed} -gt 200 ]] && subject="${subject}..."
 
-# resolve state dir
-STATE_DIR="${TMO_STATE_DIR:-${PWD}/state}"
+# resolve state dir (portable, workspace-aware)
+STATE_DIR="$(tmo_resolve_state_dir)"
 [[ -d "$STATE_DIR" ]] || exit 0
 [[ -f "$STATE_DIR/messages.jsonl" ]] || exit 0
 
