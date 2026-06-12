@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "tmux-orchestration",
+  "description": "Persistent tmux multi-Claude orchestrator: the current session becomes orchestrator and drives N worker-Claude tmux sessions with roles, file-scope, skill-hints and quality-gate supervision.",
+  "owner": {
+    "name": "Freek Heijting",
+    "url": "https://github.com/FreekHeijting"
+  },
+  "plugins": [
+    {
+      "name": "tmux-orchestration",
+      "description": "Persistent tmux multi-Claude orchestrator with roles, skills, hooks and the tmo CLI. VS Code panel-aware.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
